@@ -10,6 +10,21 @@ from matplotlib import pyplot as plt
 from torch.utils.data import Dataset
 
 
+def seed_everything(seed: int = 42, deterministic: bool = False):
+    import random
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # cuDNN 控制
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
+
+
 def extract_patches_with_overlap_2d(data, patch_size, overlap):
     """
     data: 2D numpy array [H, W]
@@ -213,86 +228,95 @@ class PatchDataset(Dataset):
         return patch
 
 
+# def test_data():
+#     dataset = segy2ds("ma2+GathAP.sgy")
+#
+#     # set a seed for dataload
+#     # use transform to convert data to 512x512, [0-1]
+#     # select 80% as sample
+#     # plot first sample
+
 if __name__ == "__main__":
-    # 生成 patches
-    dataset = segy2ds("ma2+GathAP.sgy")
-    data = dataset[100].numpy()
-
-    # 输出存放目录
-    output_dir = "preprocessed_patches"
-    os.makedirs(output_dir, exist_ok=True)
-
-    patch_size = (64, 64)
-    overlap = (16, 16)
-
-    # 遍历整个数据集
-    for idx in tqdm.tqdm(range(len(dataset))):
-        # 取炮集数据
-        data = dataset[idx].numpy()  # [1,5,n_traces,n_samples]
-        shot = data[0, 0, :, :]  # 取炮集通道 -> [n_traces, n_samples]
-
-        # 切 patch
-        patches, positions, original_shape = extract_patches_with_overlap_2d(
-            shot, patch_size=patch_size, overlap=overlap
-        )
-
-        # patches: (N, H, W)
-        min_val = patches.min(axis=(1, 2), keepdims=True)
-        max_val = patches.max(axis=(1, 2), keepdims=True)
-
-        range_val = max_val - min_val
-
-        # 防止除0
-        range_val[range_val == 0] = 1.0
-
-        patches_norm = (patches - min_val) / range_val
-
-        # 保存到硬盘
-        out_file = os.path.join(output_dir, f"shot_{idx:04d}.npz")
-        np.savez_compressed(
-            out_file,
-            patches=patches_norm,
-            positions=positions,
-            original_shape=original_shape
-        )
-
-    # 读取dataset
-    dataset = PatchDataset("preprocessed_patches")
-
-    print("patch 数量:", len(dataset))
-
-    # 取第一个 patch
-    patch = dataset[0]
-    print(patch.shape)  # [1, ph, pw]，例如 [1, 256, 256]
-
-    # DataLoader
-    from torch.utils.data import DataLoader
-
-    loader = DataLoader(dataset, batch_size=16, shuffle=True)
-
-    # 取一个 batch
-    batch = next(iter(loader))  # [B, 1, H, W]
-
-    num_show = min(16, batch.shape[0])  # 最多16个
-
-    plt.figure(figsize=(10, 10))
-
-    for i in range(num_show):
-        plt.subplot(4, 4, i + 1)
-
-        patch = batch[i, 0].cpu().numpy()
-
-        plt.imshow(
-            patch,
-            cmap='seismic',
-            aspect='auto',
-            vmin=0.0,  # 你的数据是0~1
-            vmax=1.0,
-            origin='upper'
-        )
-
-        plt.title(f"{i}")
-        plt.axis("off")
-
-    plt.tight_layout()
-    plt.show()
+    pass
+    # # 生成 patches
+    # dataset = segy2ds("ma2+GathAP.sgy")
+    # data = dataset[100].numpy()
+    #
+    # # 输出存放目录
+    # output_dir = "preprocessed_patches"
+    # os.makedirs(output_dir, exist_ok=True)
+    #
+    # patch_size = (64, 64)
+    # overlap = (16, 16)
+    #
+    # # 遍历整个数据集
+    # for idx in tqdm.tqdm(range(len(dataset))):
+    #     # 取炮集数据
+    #     data = dataset[idx].numpy()  # [1,5,n_traces,n_samples]
+    #     shot = data[0, 0, :, :]  # 取炮集通道 -> [n_traces, n_samples]
+    #
+    #     # 切 patch
+    #     patches, positions, original_shape = extract_patches_with_overlap_2d(
+    #         shot, patch_size=patch_size, overlap=overlap
+    #     )
+    #
+    #     # patches: (N, H, W)
+    #     min_val = patches.min(axis=(1, 2), keepdims=True)
+    #     max_val = patches.max(axis=(1, 2), keepdims=True)
+    #
+    #     range_val = max_val - min_val
+    #
+    #     # 防止除0
+    #     range_val[range_val == 0] = 1.0
+    #
+    #     patches_norm = (patches - min_val) / range_val
+    #
+    #     # 保存到硬盘
+    #     out_file = os.path.join(output_dir, f"shot_{idx:04d}.npz")
+    #     np.savez_compressed(
+    #         out_file,
+    #         patches=patches_norm,
+    #         positions=positions,
+    #         original_shape=original_shape
+    #     )
+    #
+    # # 读取dataset
+    # dataset = PatchDataset("preprocessed_patches")
+    #
+    # print("patch 数量:", len(dataset))
+    #
+    # # 取第一个 patch
+    # patch = dataset[0]
+    # print(patch.shape)  # [1, ph, pw]，例如 [1, 256, 256]
+    #
+    # # DataLoader
+    # from torch.utils.data import DataLoader
+    #
+    # loader = DataLoader(dataset, batch_size=16, shuffle=True)
+    #
+    # # 取一个 batch
+    # batch = next(iter(loader))  # [B, 1, H, W]
+    #
+    # num_show = min(16, batch.shape[0])  # 最多16个
+    #
+    # plt.figure(figsize=(10, 10))
+    #
+    # for i in range(num_show):
+    #     plt.subplot(4, 4, i + 1)
+    #
+    #     patch = batch[i, 0].cpu().numpy()
+    #
+    #     plt.imshow(
+    #         patch,
+    #         cmap='seismic',
+    #         aspect='auto',
+    #         vmin=0.0,  # 你的数据是0~1
+    #         vmax=1.0,
+    #         origin='upper'
+    #     )
+    #
+    #     plt.title(f"{i}")
+    #     plt.axis("off")
+    #
+    # plt.tight_layout()
+    # plt.show()
