@@ -290,7 +290,7 @@ if __name__ == "__main__":
     # print(patch.shape)  # [1, ph, pw]，例如 [1, 256, 256]
     #
     # # DataLoader
-    # from torch.utils.data import DataLoader
+    # from torch.tools.data import DataLoader
     #
     # loader = DataLoader(dataset, batch_size=16, shuffle=True)
     #

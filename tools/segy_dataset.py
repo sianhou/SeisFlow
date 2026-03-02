@@ -152,7 +152,7 @@ if __name__ == "__main__":
         transforms.Resize((512, 512)),
     ])
 
-    dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
+    dataset = SegyDataset("../ma2+GathAP.sgy", transform=transform)
 
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0)
     x = next(iter(dataloader))
