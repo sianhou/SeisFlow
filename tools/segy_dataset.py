@@ -7,8 +7,6 @@ from matplotlib import pyplot as plt
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from utils import seed_everything
-
 
 class MinMaxToMinus1Plus1:
     def __init__(self, eps=1e-12):
