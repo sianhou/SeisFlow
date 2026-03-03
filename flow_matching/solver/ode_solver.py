@@ -28,16 +28,16 @@ class ODESolver(Solver):
         self.velocity_model = velocity_model
 
     def sample(
-        self,
-        x_init: Tensor,
-        step_size: Optional[float],
-        method: str = "euler",
-        atol: float = 1e-5,
-        rtol: float = 1e-5,
-        time_grid: Tensor = torch.tensor([0.0, 1.0]),
-        return_intermediates: bool = False,
-        enable_grad: bool = False,
-        **model_extras,
+            self,
+            x_init: Tensor,
+            step_size: Optional[float],
+            method: str = "euler",
+            atol: float = 1e-5,
+            rtol: float = 1e-5,
+            time_grid: Tensor = torch.tensor([0.0, 1.0]),
+            return_intermediates: bool = False,
+            enable_grad: bool = False,
+            **model_extras,
     ) -> Union[Tensor, Sequence[Tensor]]:
         r"""Solve the ODE with the velocity field.
 
@@ -104,18 +104,18 @@ class ODESolver(Solver):
             return sol[-1]
 
     def compute_likelihood(
-        self,
-        x_1: Tensor,
-        log_p0: Callable[[Tensor], Tensor],
-        step_size: Optional[float],
-        method: str = "euler",
-        atol: float = 1e-5,
-        rtol: float = 1e-5,
-        time_grid: Tensor = torch.tensor([1.0, 0.0]),
-        return_intermediates: bool = False,
-        exact_divergence: bool = False,
-        enable_grad: bool = False,
-        **model_extras,
+            self,
+            x_1: Tensor,
+            log_p0: Callable[[Tensor], Tensor],
+            step_size: Optional[float],
+            method: str = "euler",
+            atol: float = 1e-5,
+            rtol: float = 1e-5,
+            time_grid: Tensor = torch.tensor([1.0, 0.0]),
+            return_intermediates: bool = False,
+            exact_divergence: bool = False,
+            enable_grad: bool = False,
+            **model_extras,
     ) -> Union[Tuple[Tensor, Tensor], Tuple[Sequence[Tensor], Tensor]]:
         r"""Solve for log likelihood given a target sample at :math:`t=0`.
 
@@ -139,7 +139,7 @@ class ODESolver(Solver):
             Union[Tuple[Tensor, Tensor], Tuple[Sequence[Tensor], Tensor]]: Samples at time_grid and log likelihood values of given x_1.
         """
         assert (
-            time_grid[0] == 1.0 and time_grid[-1] == 0.0
+                time_grid[0] == 1.0 and time_grid[-1] == 0.0
         ), f"Time grid must start at 1.0 and end at 0.0. Got {time_grid}"
 
         # Fix the random projection for the Hutchinson divergence estimator
