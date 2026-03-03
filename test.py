@@ -14,8 +14,8 @@ from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from models.unet import UNetModel
-from tools.seed_everything import seed_everything
-from tools.segy_dataset import SegyDataset, ClipFirstChannel, SliceLastDim
+from core.seed_everything import seed_everything
+from core.segy_dataset import SegyDataset, ClipFirstChannel, SliceLastDim
 
 logger = logging.getLogger(__name__)
 
