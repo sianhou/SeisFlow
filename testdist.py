@@ -107,6 +107,7 @@ def create_parser():
     parser.add_argument("--model_path", default="/disk03/hsa/SeisFlow/model_epoch_0100.pth",
                         help="Pre-trained model for sampling")
     parser.add_argument("--num_workers", default=10, type=int)
+    parser.add_argument("--save_frequency", default=50, type=int)
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--optimizer_betas", nargs="+", type=float, default=[0.9, 0.95],
                         help="learning rate (absolute lr)")
@@ -270,8 +271,8 @@ def train(args):
         lr_schedule.step()
 
         # ===== 每100个epoch保存模型 =====
-        if (epoch + 1) % 100 == 0 and distributed_mode.get_rank() == 0:
-            save_path = f"model_epoch_{epoch + 1:04d}.pth"
+        if (epoch + 1) % args.save_frequency == 0 and distributed_mode.get_rank() == 0:
+            save_path = f"{args.output_dir}/model_epoch_{epoch + 1:05d}.pth"
             torch.save(model_without_ddp.state_dict(), save_path)
             print(f"Saved checkpoint: {save_path}")
 
