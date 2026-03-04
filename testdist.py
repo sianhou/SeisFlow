@@ -6,6 +6,9 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
+from torch.nn import Module
+from torch.nn.parallel import DistributedDataParallel
 from torchmetrics import MeanMetric
 from torchvision import transforms
 
@@ -15,6 +18,8 @@ from core.logger import BaseLogger
 from core.seed_everything import seed_everything
 from core.segy_dataset import SliceLastDim, ClipFirstChannel, ScaleFirstChannel, SegyDataset
 from flow_matching.path import CondOTProbPath
+from flow_matching.solver import ODESolver
+from flow_matching.utils import ModelWrapper
 from models.unet import UNetModel
 from training import distributed_mode
 
@@ -42,6 +47,48 @@ MODEL_CONFIGS = {
 }
 
 
+class CFGScaledModel(ModelWrapper):
+    def __init__(self, model: Module):
+        super().__init__(model)
+        self.nfe_counter = 0
+
+    def forward(
+            self, x: torch.Tensor, t: torch.Tensor, cfg_scale: float, label: torch.Tensor
+    ):
+        module = (
+            self.model.module
+            if isinstance(self.model, DistributedDataParallel)
+            else self.model
+        )
+        is_discrete = False
+        assert (
+                cfg_scale == 0.0 or not is_discrete
+        ), f"Cfg scaling does not work for the logit outputs of discrete models. Got cfg weight={cfg_scale} and model {type(self.model)}."
+        t = torch.zeros(x.shape[0], device=x.device) + t
+
+        if cfg_scale != 0.0:
+            with torch.cuda.amp.autocast(), torch.no_grad():
+                conditional = self.model(x, t, extra={"label": label})
+                condition_free = self.model(x, t, extra={})
+            result = (1.0 + cfg_scale) * conditional - cfg_scale * condition_free
+        else:
+            # Model is fully conditional, no cfg weighting needed
+            with torch.cuda.amp.autocast(), torch.no_grad():
+                result = self.model(x, t, extra={"label": label})
+
+        self.nfe_counter += 1
+        if is_discrete:
+            return torch.softmax(result.to(dtype=torch.float32), dim=-1)
+        else:
+            return result.to(dtype=torch.float32)
+
+    def reset_nfe_counter(self) -> None:
+        self.nfe_counter = 0
+
+    def get_nfe(self) -> int:
+        return self.nfe_counter
+
+
 def create_parser():
     parser = argparse.ArgumentParser(description='Synthetic seismic dataset training')
     parser.add_argument("--accum_iter", default=1, type=int,
@@ -56,6 +103,9 @@ def create_parser():
     parser.add_argument("--dist_url", default="env://", help="url used to set up distributed training")
     parser.add_argument("--epochs", default=1000, type=int)
     parser.add_argument("--lr", type=float, default=0.0001, help="learning rate (absolute lr)")
+    parser.add_argument("--mode", default="train", choices=["train", "sample"])
+    parser.add_argument("--model_path", default="/disk03/hsa/SeisFlow/model_epoch_0100.pth",
+                        help="Pre-trained model for sampling")
     parser.add_argument("--num_workers", default=10, type=int)
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--optimizer_betas", nargs="+", type=float, default=[0.9, 0.95],
@@ -67,7 +117,7 @@ def create_parser():
     return parser
 
 
-def main(args):
+def train(args):
     distributed_mode.init_distributed_mode(args)
 
     logger = BaseLogger(log_dir=args.output_dir, overwrite=True)
@@ -222,7 +272,7 @@ def main(args):
         # ===== 每100个epoch保存模型 =====
         if (epoch + 1) % 100 == 0 and distributed_mode.get_rank() == 0:
             save_path = f"model_epoch_{epoch + 1:04d}.pth"
-            torch.save(model.state_dict(), save_path)
+            torch.save(model_without_ddp.state_dict(), save_path)
             print(f"Saved checkpoint: {save_path}")
 
     if args.distributed:
@@ -230,9 +280,58 @@ def main(args):
         distributed_mode.destroy()
 
 
+def sample(args):
+    # device
+    device = torch.device(args.device)
+
+    # fix the seed for reproducibility
+    seed_everything(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = UNetModel(**MODEL_CONFIGS["simple"])
+    model.load_state_dict(torch.load(args.model_path))
+
+    cfg_scaled_model = CFGScaledModel(model=model)
+    cfg_scaled_model.to(device)
+    cfg_scaled_model.train(False)
+
+    solver = ODESolver(velocity_model=cfg_scaled_model)
+
+    x_0 = torch.randn([4, 1, 256, 256], dtype=torch.float32, device=device)
+    time_grid = torch.tensor([0.0, 1.0], device=device)
+
+    synthetic_samples = solver.sample(
+        time_grid=time_grid,
+        x_init=x_0,
+        return_intermediates=False,
+        step_size=0.01,
+        cfg_scale=0.0,
+        label=None,
+    )
+
+    imgs = synthetic_samples[:, 0]  # [B,H,W]
+    imgs = imgs.detach().cpu().numpy()
+
+    fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+    axes = axes.ravel()
+    for i in range(4):
+        axes[i].imshow(imgs[i].T, cmap="seismic", origin="upper", vmin=-1, vmax=1)
+        axes[i].set_title(f"sample {i} (ch0)")
+        axes[i].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(f"{args.output_dir}/sample.png")
+
+
 if __name__ == '__main__':
     parser = create_parser()
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    main(args)
+
+    if args.mode == "train":
+        train(args)
+    elif args.mode == "sample":
+        sample(args)
+    else:
+        exit()

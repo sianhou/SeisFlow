@@ -485,8 +485,6 @@ class UNetModel(nn.Module):
     def __post_init__(self):
         super().__init__()
 
-        print(f"use_checkpoint: {self.use_checkpoint}")
-
         if self.with_fourier_features:
             self.in_channels += 12
 
