@@ -30,7 +30,7 @@ MODEL_CONFIGS = {
         "conv_resample": True,
         "dims": 2,
         "num_classes": None,
-        "use_checkpoint": True,
+        "use_checkpoint": False,
         "num_heads": 4,
         "num_head_channels": -1,
         "num_heads_upsample": -1,
@@ -195,9 +195,8 @@ def main(args):
             x_t = path_sample.x_t
             u_t = path_sample.dx_t
 
-            pred = model(x_t, t, extra={})
-
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
+                pred = model(x_t, t, extra={})
                 loss = F.mse_loss(pred, u_t)
 
             loss_value = loss.item()
@@ -225,6 +224,10 @@ def main(args):
             save_path = f"model_epoch_{epoch + 1:04d}.pth"
             torch.save(model.state_dict(), save_path)
             print(f"Saved checkpoint: {save_path}")
+
+    if args.distributed:
+        distributed_mode.barrier()
+        distributed_mode.destroy()
 
 
 if __name__ == '__main__':

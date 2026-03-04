@@ -34,6 +34,14 @@ def is_main_process():
     return get_rank() == 0
 
 
+def barrier():
+    dist.barrier()
+
+
+def destroy():
+    dist.destroy_process_group()
+
+
 def init_distributed_mode(args):
     if args.dist_on_itp:
         args.rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
@@ -52,7 +60,7 @@ def init_distributed_mode(args):
         args.world_size = int(os.environ["WORLD_SIZE"])
         args.gpu = int(os.environ["LOCAL_RANK"])
     elif (
-        "SLURM_PROCID" in os.environ and os.environ["SLURM_JOB_NAME"] != "bash"
+            "SLURM_PROCID" in os.environ and os.environ["SLURM_JOB_NAME"] != "bash"
     ):  # Exclude interactive shells
         args.rank = int(os.environ["SLURM_PROCID"])
         args.gpu = args.rank % torch.cuda.device_count()

@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from models.nn import (
     avg_pool_nd,
     checkpoint,
@@ -32,7 +33,7 @@ class ConstantEmbedding(nn.Module):
         super().__init__()
         self.embedding_table = nn.Parameter(torch.empty((1, out_channels)))
         nn.init.uniform_(
-            self.embedding_table, -(in_channels**0.5), in_channels**0.5
+            self.embedding_table, -(in_channels ** 0.5), in_channels ** 0.5
         )
 
     def forward(self, emb):
@@ -45,15 +46,15 @@ class AttentionPool2d(nn.Module):
     """
 
     def __init__(
-        self,
-        spacial_dim: int,
-        embed_dim: int,
-        num_heads_channels: int,
-        output_dim: int = None,
+            self,
+            spacial_dim: int,
+            embed_dim: int,
+            num_heads_channels: int,
+            output_dim: int = None,
     ):
         super().__init__()
         self.positional_embedding = nn.Parameter(
-            torch.randn(embed_dim, spacial_dim**2 + 1) / embed_dim**0.5
+            torch.randn(embed_dim, spacial_dim ** 2 + 1) / embed_dim ** 0.5
         )
         self.qkv_proj = conv_nd(1, embed_dim, 3 * embed_dim, 1)
         self.c_proj = conv_nd(1, embed_dim, output_dim or embed_dim, 1)
@@ -175,18 +176,18 @@ class ResBlock(TimestepBlock):
     """
 
     def __init__(
-        self,
-        channels,
-        emb_channels,
-        dropout,
-        out_channels=None,
-        use_conv=False,
-        use_scale_shift_norm=False,
-        dims=2,
-        use_checkpoint=False,
-        up=False,
-        down=False,
-        emb_off=False,
+            self,
+            channels,
+            emb_channels,
+            dropout,
+            out_channels=None,
+            use_conv=False,
+            use_scale_shift_norm=False,
+            dims=2,
+            use_checkpoint=False,
+            up=False,
+            down=False,
+            emb_off=False,
     ):
         super().__init__()
         self.channels = channels
@@ -293,12 +294,12 @@ class AttentionBlock(nn.Module):
     """
 
     def __init__(
-        self,
-        channels,
-        num_heads=1,
-        num_head_channels=-1,
-        use_checkpoint=False,
-        use_new_attention_order=False,
+            self,
+            channels,
+            num_heads=1,
+            num_head_channels=-1,
+            use_checkpoint=False,
+            use_new_attention_order=False,
     ):
         super().__init__()
         self.channels = channels
@@ -306,7 +307,7 @@ class AttentionBlock(nn.Module):
             self.num_heads = num_heads
         else:
             assert (
-                channels % num_head_channels == 0
+                    channels % num_head_channels == 0
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
@@ -354,7 +355,7 @@ def count_flops_attn(model, _x, y):
     # We perform two matmuls with the same number of ops.
     # The first computes the weight matrix, the second computes
     # the combination of the value vectors.
-    matmul_ops = 2 * b * (num_spatial**2) * c
+    matmul_ops = 2 * b * (num_spatial ** 2) * c
     model.total_ops += torch.DoubleTensor([matmul_ops])
 
 
@@ -483,6 +484,8 @@ class UNetModel(nn.Module):
 
     def __post_init__(self):
         super().__init__()
+
+        print(f"use_checkpoint: {self.use_checkpoint}")
 
         if self.with_fourier_features:
             self.in_channels += 12
@@ -690,7 +693,7 @@ class UNetModel(nn.Module):
         if self.num_classes is not None and "label" in extra:
             y = extra["label"]
             assert (
-                y.shape == x.shape[:1]
+                    y.shape == x.shape[:1]
             ), f"Labels have shape {y.shape}, which does not match the batch dimension of the input {x.shape}"
             emb = emb + self.label_emb(y)
 
@@ -712,12 +715,12 @@ class UNetModel(nn.Module):
 
 # Based on https://github.com/google-research/vdm/blob/main/model_vdm.py
 def base2_fourier_features(
-    inputs: torch.Tensor, start: int = 0, stop: int = 8, step: int = 1
+        inputs: torch.Tensor, start: int = 0, stop: int = 8, step: int = 1
 ) -> torch.Tensor:
     freqs = torch.arange(start, stop, step, device=inputs.device, dtype=inputs.dtype)
 
     # Create Base 2 Fourier features
-    w = 2.0**freqs * 2 * np.pi
+    w = 2.0 ** freqs * 2 * np.pi
     w = torch.tile(w[None, :], (1, inputs.size(1)))
 
     # Compute features
