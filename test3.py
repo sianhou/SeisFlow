@@ -1,4 +1,5 @@
 # device
+import numpy as np
 import torch
 from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel
@@ -8,6 +9,7 @@ from core.generate_mask import generate_random_row_mask
 from core.plot_seismic import plot_one_row
 from core.seed_everything import seed_everything
 from core.segy_dataset import SliceLastDim, ClipFirstChannel, ScaleFirstChannel, SegyDataset
+from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from models.unet import UNetModel
@@ -79,6 +81,19 @@ class CFGScaledModel(ModelWrapper):
         return self.nfe_counter
 
 
+def generate_time_intervals(breakpoints):
+    """
+    Generate time intervals from a list of breakpoints.
+
+    Args:
+        breakpoints (list): List of time points [t0, t1, t2, ..., tn]
+
+    Returns:
+        list: List of tuples containing consecutive time intervals
+    """
+    return [(float(breakpoints[i]), float(breakpoints[i + 1])) for i in range(len(breakpoints) - 1)]
+
+
 device = torch.device("cuda")
 
 # fix the seed for reproducibility
@@ -116,6 +131,7 @@ cfg_scaled_model.train(False)
 solver = ODESolver(velocity_model=cfg_scaled_model)
 
 x_0 = torch.randn([1, 1, 256, 256], dtype=torch.float32, device=device)
+
 time_grid = torch.tensor([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], device=device)
 
 synthetic_samples = solver.sample(
@@ -128,72 +144,47 @@ synthetic_samples = solver.sample(
     concat_conditioning=extra
 ).squeeze()
 
-print(synthetic_samples.shape)
-
 imgs = synthetic_samples.detach().cpu().numpy()
 plot_one_row(
     imgs, "synthetic_samples_one_step.png", "synthetic_samples_one_step", -1, 1)
 
-time_grid0 = torch.tensor([0.0, 0.2], device=device)
-synthetic_samples0 = solver.sample(
-    time_grid=time_grid0,
-    x_init=x_0,
-    return_intermediates=False,
-    step_size=0.01,
-    cfg_scale=0.0,
-    label=None,
-    concat_conditioning=extra
-)
+time_intervals = generate_time_intervals(np.round(np.arange(0, 1.001, 0.2), 2))
 
-time_grid1 = torch.tensor([0.2, 0.4], device=device)
-synthetic_samples1 = solver.sample(
-    time_grid=time_grid1,
-    x_init=synthetic_samples0,
-    return_intermediates=False,
-    step_size=0.01,
-    cfg_scale=0.0,
-    label=None,
-    concat_conditioning=extra
-)
+synthetic_samples = [x_0]
+path_samples = [samples]
 
-time_grid2 = torch.tensor([0.4, 0.6], device=device)
-synthetic_samples2 = solver.sample(
-    time_grid=time_grid2,
-    x_init=synthetic_samples1,
-    return_intermediates=False,
-    step_size=0.01,
-    cfg_scale=0.0,
-    label=None,
-    concat_conditioning=extra
-)
+current_x = x_0
 
-time_grid3 = torch.tensor([0.6, 0.8], device=device)
-synthetic_samples3 = solver.sample(
-    time_grid=time_grid3,
-    x_init=synthetic_samples2,
-    return_intermediates=False,
-    step_size=0.01,
-    cfg_scale=0.0,
-    label=None,
-    concat_conditioning=extra
-)
+path = CondOTProbPath()
+for start, end in time_intervals:
+    # calculate x_t-1
+    time_grid_interval = torch.tensor([start, end], device=device)
+    current_x = solver.sample(
+        time_grid=time_grid_interval,
+        x_init=current_x,
+        return_intermediates=False,
+        step_size=0.01,
+        cfg_scale=0.0,
+        label=None,
+        concat_conditioning=extra
+    )
 
-time_grid4 = torch.tensor([0.8, 1.0], device=device)
-synthetic_samples4 = solver.sample(
-    time_grid=time_grid4,
-    x_init=synthetic_samples3,
-    return_intermediates=False,
-    step_size=0.01,
-    cfg_scale=0.0,
-    label=None,
-    concat_conditioning=extra
-)
+    # sample x_t-1 from x_0
+    noise = torch.randn_like(current_x).to(device)
 
-synthetic_samples_multi_step = torch.cat(
-    (x_0, synthetic_samples0, synthetic_samples1, synthetic_samples2, synthetic_samples3, synthetic_samples4), axis=0)
+    t = torch.torch.zeros(current_x.shape[0]).fill_(end).to(device)
+
+    path_sample = path.sample(t=t, x_0=noise, x_1=samples)
+
+    current_x = path_sample.x_t * mask + current_x * (1 - mask)
+
+    synthetic_samples.append(current_x)
+
+synthetic_samples_multi_step = torch.cat(synthetic_samples, axis=0)
+
 imgs2 = synthetic_samples_multi_step.squeeze().detach().cpu().numpy()
 plot_one_row(
-    imgs2, "synthetic_samples_multi_step.png", "synthetic_samples_multi_step", -1, 1)
+    imgs2, "synthetic_samples_multi_step2.png", "synthetic_samples_multi_step2", -1, 1)
 
 plot_one_row(
     imgs - imgs2, "diff.png", "diff", -1, 1)
