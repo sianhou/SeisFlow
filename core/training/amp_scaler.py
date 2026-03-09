@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 
 
-def get_grad_norm_(parameters, norm_type: float = 2.0) -> Tensor:
+def compute_grad_norm(parameters, norm_type: float = 2.0) -> Tensor:
     if isinstance(parameters, Tensor):
         parameters = [parameters]
     parameters = [p for p in parameters if p.grad is not None]
@@ -22,7 +22,7 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> Tensor:
     return total_norm
 
 
-class NativeScalerWithGradNormCount:
+class AMPGradScaler:
     state_dict_key = "amp_scaler"
 
     def __init__(self):
@@ -47,7 +47,7 @@ class NativeScalerWithGradNormCount:
                 norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
             else:
                 self._scaler.unscale_(optimizer)
-                norm = get_grad_norm_(parameters)
+                norm = compute_grad_norm(parameters)
             self._scaler.step(optimizer)
             self._scaler.update()
         else:

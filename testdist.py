@@ -12,11 +12,10 @@ from torch.nn.parallel import DistributedDataParallel
 from torchmetrics import MeanMetric
 from torchvision import transforms
 
-from core.count_params import count_params
-from core.grad_scaler import NativeScalerWithGradNormCount as NativeScaler
-from core.logger import BaseLogger
-from core.seed_everything import seed_everything
-from core.segy_dataset import SliceLastDim, ClipFirstChannel, ScaleFirstChannel, SegyDataset
+from core.dataset import SegyDataset
+from core.logging.logger import SimpleLogger
+from core.training import set_random_seed, count_model_parameters, AMPGradScaler
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
@@ -121,7 +120,7 @@ def create_parser():
 def train(args):
     distributed_mode.init_distributed_mode(args)
 
-    logger = BaseLogger(log_dir=args.output_dir, overwrite=True)
+    logger = SimpleLogger(log_dir=args.output_dir, overwrite=True)
     logger.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
     logger.info("{}".format(args).replace(", ", ",\n"))
 
@@ -130,12 +129,12 @@ def train(args):
 
     # fix the seed for reproducibility
     seed = args.seed + distributed_mode.get_rank()
-    seed_everything(seed)
+    set_random_seed(seed)
 
     # dataset
     logger.info(f"Initializing Dataset: {args.dataset}")
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        SliceLastDimension(0, 1501),
         ClipFirstChannel(-2, 2),
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
@@ -164,7 +163,7 @@ def train(args):
 
     model.to(device)
     model_without_ddp = model
-    total, trainable, frozen = count_params(model_without_ddp)
+    total, trainable, frozen = count_model_parameters(model_without_ddp)
     logger.info(str(model_without_ddp))
     logger.info(f"Total params:     {total:,}")
     logger.info(f"Trainable params: {trainable:,}")
@@ -205,7 +204,7 @@ def train(args):
     logger.info(f"Optimizer: {optimizer}")
     logger.info(f"Learning-Rate Schedule: {lr_schedule}")
 
-    loss_scaler = NativeScaler()
+    loss_scaler = AMPGradScaler()
 
     # load_model(
     #     args=args,
@@ -286,7 +285,7 @@ def sample(args):
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed_everything(args.seed)
+    set_random_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNetModel(**MODEL_CONFIGS["simple"])

@@ -10,12 +10,13 @@ from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel
 from torchvision import transforms
 
+from core.dataset import SegyDataset
+from core.training import set_random_seed
+from core.transforms import SliceLastDimension, ClipFirstChannel
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from models.unet import UNetModel
-from core.seed_everything import seed_everything
-from core.segy_dataset import SegyDataset, ClipFirstChannel, SliceLastDim
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +72,11 @@ def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    seed_everything(seed)
+    set_random_seed(seed)
 
     logger.info(f"Initializing Dataset:")
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        SliceLastDimension(0, 1501),
         ClipFirstChannel(-2, 2),
         transforms.Resize((256, 256)),
     ])
@@ -191,7 +192,7 @@ class CFGScaledModel(ModelWrapper):
 
 
 def eval(checkpoint):
-    seed_everything(seed)
+    set_random_seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNetModel(**MODEL_CONFIGS["simple"])

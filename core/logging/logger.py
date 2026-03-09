@@ -5,7 +5,7 @@ import sys
 import torch.distributed as dist
 
 
-class BaseLogger:
+class SimpleLogger:
     """
     A minimal logger for PyTorch training.
 
@@ -102,6 +102,6 @@ class BaseLogger:
 
 
 if __name__ == "__main__":
-    logger = BaseLogger(log_dir="./logs", log_file="train.log", level=logging.INFO, overwrite=True, append=False)
+    logger = SimpleLogger(log_dir="../logs", log_file="train.log", level=logging.INFO, overwrite=True, append=False)
     logger.info("Start training")
     logger.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))

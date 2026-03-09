@@ -12,14 +12,13 @@ from torch.nn.parallel import DistributedDataParallel
 from torchmetrics import MeanMetric
 from torchvision import transforms
 
-from core.count_params import count_params
-from core.evaluate import calculate_psnr
-from core.generate_mask import generate_random_row_mask
-from core.grad_scaler import NativeScalerWithGradNormCount as NativeScaler
-from core.logger import BaseLogger
-from core.plot_seismic import plot2x2
-from core.seed_everything import seed_everything
-from core.segy_dataset import SliceLastDim, ClipFirstChannel, ScaleFirstChannel, SegyDataset
+from core.dataset import SegyDataset
+from core.logging.logger import SimpleLogger
+from core.masks.row_mask import generate_random_row_mask
+from core.metrics import compute_psnr
+from core.training import set_random_seed, count_model_parameters, AMPGradScaler
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
+from core.visualization import plot_seismic_grid
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
@@ -139,7 +138,7 @@ def create_parser():
 def train(args):
     distributed_mode.init_distributed_mode(args)
 
-    logger = BaseLogger(log_dir=args.output_dir, overwrite=True)
+    logger = SimpleLogger(log_dir=args.output_dir, overwrite=True)
     logger.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
     logger.info("{}".format(args).replace(", ", ",\n"))
 
@@ -148,12 +147,12 @@ def train(args):
 
     # fix the seed for reproducibility
     seed = args.seed + distributed_mode.get_rank()
-    seed_everything(seed)
+    set_random_seed(seed)
 
     # dataset
     logger.info(f"Initializing Dataset: {args.dataset}")
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        SliceLastDimension(0, 1501),
         ClipFirstChannel(-2, 2),
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
@@ -182,7 +181,7 @@ def train(args):
 
     model.to(device)
     model_without_ddp = model
-    total, trainable, frozen = count_params(model_without_ddp)
+    total, trainable, frozen = count_model_parameters(model_without_ddp)
     logger.info(str(model_without_ddp))
     logger.info(f"Total params:     {total:,}")
     logger.info(f"Trainable params: {trainable:,}")
@@ -223,7 +222,7 @@ def train(args):
     logger.info(f"Optimizer: {optimizer}")
     logger.info(f"Learning-Rate Schedule: {lr_schedule}")
 
-    loss_scaler = NativeScaler()
+    loss_scaler = AMPGradScaler()
 
     # load_model(
     #     args=args,
@@ -305,14 +304,16 @@ def train(args):
                 mask = mask[0:4].detach().cpu().numpy()
                 missed = missed[0:4].detach().cpu().numpy()
 
-                plot2x2(raw, f"{args.output_dir}/raw_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
-                        title="raw")
-                plot2x2(noised, f"{args.output_dir}/noised_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
-                        title="noised")
-                plot2x2(mask, f"{args.output_dir}/mask_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
-                        title="mask")
-                plot2x2(missed, f"{args.output_dir}/missed_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
-                        title="missed")
+                plot_seismic_grid(raw, f"{args.output_dir}/raw_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
+                                  title="raw")
+                plot_seismic_grid(noised,
+                                  f"{args.output_dir}/noised_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
+                                  title="noised")
+                plot_seismic_grid(mask, f"{args.output_dir}/mask_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
+                                  title="mask")
+                plot_seismic_grid(missed,
+                                  f"{args.output_dir}/missed_epoch{epoch}_rank{distributed_mode.get_rank()}.png",
+                                  title="missed")
 
     if args.distributed:
         distributed_mode.barrier()
@@ -326,11 +327,11 @@ def sample(args):
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed_everything(args.seed)
+    set_random_seed(args.seed)
 
     # data
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        SliceLastDimension(0, 1501),
         ClipFirstChannel(-2, 2),
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
@@ -385,14 +386,14 @@ def sample(args):
     missed = missed[0:4].detach().cpu().numpy()
     recon = synthetic_samples[0:4].detach().cpu().numpy()
 
-    plot2x2(raw, f"{args.output_dir}/raw.png", title="raw")
-    plot2x2(mask, f"{args.output_dir}/mask.png", title="mask")
-    plot2x2(missed, f"{args.output_dir}/missed.png", title="missed")
-    plot2x2(recon, f"{args.output_dir}/recon.png", title="missed")
-    plot2x2(raw - recon, f"{args.output_dir}/diff.png", title="missed")
+    plot_seismic_grid(raw, f"{args.output_dir}/raw.png", title="raw")
+    plot_seismic_grid(mask, f"{args.output_dir}/mask.png", title="mask")
+    plot_seismic_grid(missed, f"{args.output_dir}/missed.png", title="missed")
+    plot_seismic_grid(recon, f"{args.output_dir}/recon.png", title="missed")
+    plot_seismic_grid(raw - recon, f"{args.output_dir}/diff.png", title="missed")
 
     for i in range(4):
-        psnr = calculate_psnr(raw[i], recon[i], 1.0)
+        psnr = compute_psnr(raw[i], recon[i], 1.0)
         print(f"psnr[{i}]: {psnr}]")
 
 

@@ -1,9 +1,10 @@
 import random
+
 import numpy as np
 import torch
 
 
-def seed_everything(seed: int = 42, deterministic: bool = False):
+def set_random_seed(seed: int = 42, deterministic: bool = False):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

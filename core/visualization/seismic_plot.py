@@ -1,7 +1,7 @@
 from matplotlib import pyplot as plt
 
 
-def plot2x2(imgs, fig_name, title="", vmin=-1, vmax=1, ):
+def plot_seismic_grid(imgs, fig_name, title="", vmin=-1, vmax=1, ):
     fig, axes = plt.subplots(2, 2, figsize=(8, 8))
     axes = axes.ravel()
 
@@ -14,7 +14,7 @@ def plot2x2(imgs, fig_name, title="", vmin=-1, vmax=1, ):
     plt.savefig(fig_name)
 
 
-def plot_one_row(imgs, fig_name, title="", vmin=-1, vmax=1, ):
+def plot_seismic_row(imgs, fig_name, title="", vmin=-1, vmax=1, ):
     num_figs = imgs.shape[0]
 
     fig, axes = plt.subplots(1, num_figs, figsize=(6, 12))

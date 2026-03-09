@@ -3,7 +3,7 @@ import math
 import numpy as np
 
 
-def calculate_psnr(img1, img2, max_pixel=255.0):
+def compute_psnr(img1, img2, max_pixel=255.0):
     """
     Calculate PSNR (Peak Signal-to-Noise Ratio) between two images.
 

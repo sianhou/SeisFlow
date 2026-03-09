@@ -3,7 +3,7 @@ import math
 import numpy as np
 
 
-def extract_patches_with_overlap_2d(data, patch_size, overlap):
+def extract_overlapping_patches_2d(data, patch_size, overlap):
     """
     data: 2D numpy array [H, W]
     patch_size: (ph, pw)
@@ -52,7 +52,7 @@ def extract_patches_with_overlap_2d(data, patch_size, overlap):
     return patches, positions, original_shape
 
 
-def reconstruct_from_patches_2d(patches, positions, original_shape):
+def reconstruct_from_overlapping_patches_2d(patches, positions, original_shape):
     """
     patches: [N, ph, pw] numpy array
     positions: [(i, j), ...]
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     plt.show()
 
     # generate patches
-    patches, positions, original_shape = extract_patches_with_overlap_2d(raw, (64, 64), (16, 16))
+    patches, positions, original_shape = extract_overlapping_patches_2d(raw, (64, 64), (16, 16))
     plt.figure(figsize=(8, 8))
 
     for i in range(25):
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     plt.show()
 
     # reconstruct
-    recon = reconstruct_from_patches_2d(patches, positions, original_shape)
+    recon = reconstruct_from_overlapping_patches_2d(patches, positions, original_shape)
 
     fig = plt.figure(figsize=(8, 8))
     plt.imshow(recon, cmap='seismic', aspect=1, vmin=vmin, vmax=vmax)

@@ -1,11 +1,13 @@
 import torch
 
 
-def generate_row_mask(x, missing_ratio=0.3):
+def generate_contiguous_row_mask(x, missing_ratio=0.3):
     """
     x: (B, C, H, W) or (..., H, W)
     missing_ratio: 缺失行比例
     """
+    assert x.ndim == 4
+
     H = x.shape[-2]
     B = x.shape[0]
 
@@ -21,6 +23,8 @@ def generate_row_mask(x, missing_ratio=0.3):
 
 
 def generate_random_row_mask(x, missing_ratio=0.3):
+    assert x.ndim == 4
+
     B, _, H, W = x.shape
     num_missing = int(H * missing_ratio)
 

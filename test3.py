@@ -5,10 +5,11 @@ from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel
 from torchvision import transforms
 
-from core.generate_mask import generate_random_row_mask
-from core.plot_seismic import plot_one_row
-from core.seed_everything import seed_everything
-from core.segy_dataset import SliceLastDim, ClipFirstChannel, ScaleFirstChannel, SegyDataset
+from core.dataset import SegyDataset
+from core.masks.row_mask import generate_random_row_mask
+from core.training import set_random_seed
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
+from core.visualization import plot_seismic_row
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
@@ -97,11 +98,11 @@ def generate_time_intervals(breakpoints):
 device = torch.device("cuda")
 
 # fix the seed for reproducibility
-seed_everything(42)
+set_random_seed(42)
 
 # data
 transform = transforms.Compose([
-    SliceLastDim(0, 1501),
+    SliceLastDimension(0, 1501),
     ClipFirstChannel(-2, 2),
     ScaleFirstChannel(0.5),
     transforms.Resize((256, 256)),
@@ -145,7 +146,7 @@ synthetic_samples = solver.sample(
 ).squeeze()
 
 imgs = synthetic_samples.detach().cpu().numpy()
-plot_one_row(
+plot_seismic_row(
     imgs, "synthetic_samples_one_step.png", "synthetic_samples_one_step", -1, 1)
 
 time_intervals = generate_time_intervals(np.round(np.arange(0, 1.001, 0.2), 2))
@@ -183,8 +184,8 @@ for start, end in time_intervals:
 synthetic_samples_multi_step = torch.cat(synthetic_samples, axis=0)
 
 imgs2 = synthetic_samples_multi_step.squeeze().detach().cpu().numpy()
-plot_one_row(
+plot_seismic_row(
     imgs2, "synthetic_samples_multi_step2.png", "synthetic_samples_multi_step2", -1, 1)
 
-plot_one_row(
+plot_seismic_row(
     imgs - imgs2, "diff.png", "diff", -1, 1)

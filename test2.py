@@ -10,8 +10,9 @@ from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel
 from torchvision import transforms
 
-from core.seed_everything import seed_everything
-from core.segy_dataset import SegyDataset, ClipFirstChannel, SliceLastDim, ScaleFirstChannel
+from core.dataset import SegyDataset
+from core.training import set_random_seed
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
@@ -103,11 +104,11 @@ def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    seed_everything(seed)
+    set_random_seed(seed)
 
     logger.info(f"Initializing Dataset:")
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        SliceLastDimension(0, 1501),
         ClipFirstChannel(-2, 2),
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
@@ -240,12 +241,12 @@ def plot4(imgs, fig_name):
 
 
 def eval(checkpoint):
-    seed_everything(seed)
+    set_random_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # data
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        ScaleFirstChannel(0, 1501),
         ClipFirstChannel(-2, 2),
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
