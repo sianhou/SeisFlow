@@ -1,4 +1,6 @@
 from collections import defaultdict
+from glob import glob
+from pathlib import Path
 
 import numpy as np
 import segyio
@@ -160,6 +162,36 @@ class SegyDataset(Dataset):
             x = self.transform(x)
 
         return x
+
+
+class PatchDataset(Dataset):
+    """Dataset that loads patches from NPZ files using paths"""
+
+    def __init__(self, data_path, transform=None, file_pattern="*.npz"):
+        """
+        Args:
+            data_path: Path to directory containing NPZ files or single NPZ file
+            transform: Optional transforms to apply
+            file_pattern: Pattern to match NPZ files (default: "*.npz")
+        """
+        super(PatchDataset, self).__init__()
+        self.transform = transform
+        self.data_path = Path(data_path)
+        print(self.data_path)
+
+        # Get all NPZ files
+        if self.data_path.is_file():
+            self.npz_files = [self.data_path]
+        else:
+            self.npz_files = sorted(glob(str(self.data_path / file_pattern)))
+
+        print(self.npz_files)
+
+    def __len__(self):
+        pass
+
+    def __getitem__(self, idx):
+        pass
 
 
 if __name__ == "__main__":

@@ -24,7 +24,6 @@ from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from models.dit import DiT
-from models.unet import UNetModel
 from training import distributed_mode
 
 MODEL_CONFIGS = {
@@ -52,7 +51,7 @@ MODEL_CONFIGS = {
         "in_channels": 3,
         "out_channels": 1,
         "input_size": 256,
-        "patch_size": 16,
+        "patch_size": 8,
         "hidden_size": 384,
         "depth": 4,
         "num_heads": 8,
@@ -352,7 +351,7 @@ def sample(args):
     extra["concat_conditioning"] = torch.cat((missed, mask), dim=1)
 
     # model
-    model = UNetModel(**MODEL_CONFIGS["simple"])
+    model = DiT(**MODEL_CONFIGS["simple_dit"])
     model.load_state_dict(torch.load(args.model_path))
 
     cfg_scaled_model = CFGScaledModel(model=model)
