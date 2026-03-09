@@ -2,6 +2,7 @@ import argparse
 import os
 
 import numpy as np
+from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from core.create_patches import extract_patches_with_overlap_2d
@@ -60,9 +61,13 @@ def test_data(args):
     print("Creating patch dataset")
     pd = PatchDataset(data_path=args.output_dir)
 
+    loader = DataLoader(pd, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+    x = next(iter(loader))
+    print(x.shape)
+
 
 if __name__ == '__main__':
     parser = create_parser()
     args = parser.parse_args()
-    # create_data(args)
+    create_data(args)
     test_data(args)
