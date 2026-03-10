@@ -52,7 +52,7 @@ MODEL_CONFIGS = {
         "input_size": 32,
         "patch_size": 4,
         "hidden_size": 384,
-        "depth": 4,
+        "depth": 8,
         "num_heads": 8,
         "mlp_ratio": 4.0,
         "num_classes": None,
@@ -320,6 +320,9 @@ def train(args):
 def sample(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
+    logger = SimpleLogger(log_dir=args.output_dir, overwrite=True)
+    logger.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
+    logger.info("{}".format(args).replace(", ", ",\n"))
     # device
     device = torch.device(args.device)
 
@@ -327,14 +330,12 @@ def sample(args):
     set_random_seed(args.seed)
 
     # data
+    logger.info(f"Initializing Dataset: {args.dataset}")
     transform = transforms.Compose([
-        SliceLastDimension(0, 1501),
-        ClipFirstChannel(-2, 2),
-        ScaleFirstChannel(0.5),
-        transforms.Resize((256, 256)),
+        PerChannelMinMaxToMinusOneOne()
     ])
-    dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
-    dataloader = torch.utils.data.DataLoader(dataset,
+    dataset_train = PatchDataset(args.dataset, transform=transform)
+    dataloader = torch.utils.data.DataLoader(dataset_train,
                                              batch_size=4,
                                              shuffle=True,
                                              num_workers=0,
@@ -358,7 +359,7 @@ def sample(args):
 
     solver = ODESolver(velocity_model=cfg_scaled_model)
 
-    x_0 = torch.randn([4, 1, 256, 256], dtype=torch.float32, device=device)
+    x_0 = torch.randn([4, 1, 32, 32], dtype=torch.float32, device=device)
     time_grid = torch.tensor([0.0, 1.0], device=device)
 
     synthetic_samples = solver.sample(
@@ -390,7 +391,7 @@ def sample(args):
     plot_seismic_grid(raw - recon, f"{args.output_dir}/diff.png", title="missed")
 
     for i in range(4):
-        psnr = compute_psnr(raw[i], recon[i], 1.0)
+        psnr = compute_psnr(raw[i], recon[i], 2.0)
         print(f"psnr[{i}]: {psnr}]")
 
 
