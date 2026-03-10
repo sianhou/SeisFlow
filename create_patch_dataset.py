@@ -5,8 +5,9 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
-from core.create_patches import extract_patches_with_overlap_2d
-from core.segy_dataset import SliceLastDim, ClipFirstChannel, ScaleFirstChannel, SegyDataset, PatchDataset
+from core.dataset import SegyDataset, PatchDataset
+from core.patching import extract_overlapping_patches_2d
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
 
 
 def create_parser():
@@ -25,7 +26,7 @@ def create_data(args):
 
     # dataset
     transform = transforms.Compose([
-        SliceLastDim(0, 1501),
+        SliceLastDimension(0, 1501),
         ClipFirstChannel(-2, 2),
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
@@ -36,7 +37,7 @@ def create_data(args):
     overlap_size = (args.overlap_size, args.overlap_size)
 
     for i in range(len(dataset)):
-        patches, positions, original_shape = extract_patches_with_overlap_2d(dataset[i][0].numpy(),
+        patches, positions, original_shape = extract_overlapping_patches_2d(dataset[i][0].numpy(),
                                                                              patch_size=patch_size,
                                                                              overlap=overlap_size)
         # Save to NPZ file
