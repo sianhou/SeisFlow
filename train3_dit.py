@@ -16,6 +16,7 @@ from core.dataset import PatchDataset, SegyDataset
 from core.logging.logger import SimpleLogger
 from core.masks.row_mask import generate_random_row_mask
 from core.metrics import compute_psnr
+from core.patching import TensorPatchProcessor
 from core.training import set_random_seed, count_model_parameters, AMPGradScaler
 from core.transforms import PerChannelMinMaxToMinusOneOne, SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
 from core.visualization import plot_seismic_grid
@@ -323,19 +324,34 @@ def sample(args):
     logger = SimpleLogger(log_dir=args.output_dir, overwrite=True)
     logger.info("job dir: {}".format(os.path.dirname(os.path.realpath(__file__))))
     logger.info("{}".format(args).replace(", ", ",\n"))
+
     # device
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
     set_random_seed(args.seed)
 
+    # # model
+    # model = DiT(**MODEL_CONFIGS["simple_dit"])
+    # model.load_state_dict(torch.load(args.model_path, map_location=device))
+    #
+    # cfg_scaled_model = CFGScaledModel(model=model)
+    # cfg_scaled_model.to(device)
+    # cfg_scaled_model.train(False)
+    #
+    # # solver
+    # solver = ODESolver(velocity_model=cfg_scaled_model)
+
     # data
     logger.info(f"Initializing Dataset: {args.dataset}")
     transform = transforms.Compose([
-        PerChannelMinMaxToMinusOneOne()
+        SliceLastDimension(0, 1501),
+        ClipFirstChannel(-2, 2),
+        ScaleFirstChannel(0.5),
+        transforms.Resize((256, 256)),
     ])
-    dataset_train = PatchDataset(args.dataset, transform=transform)
-    dataloader = torch.utils.data.DataLoader(dataset_train,
+    dataset = SegyDataset(args.dataset, transform=transform)
+    dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=4,
                                              shuffle=True,
                                              num_workers=0,
@@ -346,39 +362,68 @@ def sample(args):
     missing_ratio = np.random.uniform(args.missing_ratio[0], args.missing_ratio[1])
     mask = generate_random_row_mask(x=samples, missing_ratio=missing_ratio)
     missed = mask * samples
-    extra = {}
-    extra["concat_conditioning"] = torch.cat((missed, mask), dim=1)
-
-    # model
-    model = DiT(**MODEL_CONFIGS["simple_dit"])
-    model.load_state_dict(torch.load(args.model_path))
-
-    cfg_scaled_model = CFGScaledModel(model=model)
-    cfg_scaled_model.to(device)
-    cfg_scaled_model.train(False)
-
-    solver = ODESolver(velocity_model=cfg_scaled_model)
-
-    x_0 = torch.randn([4, 1, 32, 32], dtype=torch.float32, device=device)
+    patch_processor = TensorPatchProcessor()
     time_grid = torch.tensor([0.0, 1.0], device=device)
+    patch_size = MODEL_CONFIGS["simple_dit"]["input_size"]
+    patch_overlap = patch_size // 2
+    reconstructed_samples = []
 
-    synthetic_samples = solver.sample(
-        time_grid=time_grid,
-        x_init=x_0,
-        return_intermediates=False,
-        step_size=0.01,
-        cfg_scale=0.0,
-        label=None,
-        concat_conditioning=extra
-    )
+    for i in range(samples.shape[0]):
+        sample = samples[i:i + 1]
+        sample_mask = mask[i:i + 1]
+        sample_missed = missed[i:i + 1]
 
-    synthetic_samples = missed + (1.0 - mask) * synthetic_samples
+        missed_patches, positions, original_shape = patch_processor.extract_overlapping_patches_2d(
+            sample_missed,
+            patch_size=(patch_size, patch_size),
+            overlap=(patch_overlap, patch_overlap),
+        )
+        mask_patches, _, _ = patch_processor.extract_overlapping_patches_2d(
+            sample_mask,
+            patch_size=(patch_size, patch_size),
+            overlap=(patch_overlap, patch_overlap),
+        )
+
+        missed_patches = missed_patches.squeeze(0)
+        mask_patches = mask_patches.squeeze(0)
+
+        patch_scales = missed_patches.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-6)
+        normalized_missed_patches = missed_patches / patch_scales
+
+        x_0 = torch.randn_like(normalized_missed_patches, device=device)
+        extra = {
+            "concat_conditioning": torch.cat((normalized_missed_patches, mask_patches), dim=1)
+        }
+
+        synthetic_patches = solver.sample(
+            time_grid=time_grid,
+            x_init=x_0,
+            return_intermediates=False,
+            step_size=0.01,
+            cfg_scale=0.0,
+            label=None,
+            concat_conditioning=extra,
+        )
+
+        synthetic_patches = (
+                normalized_missed_patches + (1.0 - mask_patches) * synthetic_patches
+        )
+        synthetic_patches = synthetic_patches * patch_scales
+        synthetic_patches = synthetic_patches.unsqueeze(0)
+
+        reconstructed_sample = patch_processor.reconstruct_from_overlapping_patches_2d(
+            synthetic_patches,
+            positions,
+            original_shape,
+        )
+        reconstructed_samples.append(reconstructed_sample)
+
+    synthetic_samples = torch.cat(reconstructed_samples, dim=0)
 
     print(f"seed: {args.seed}")
     print(f"missing_ratio: {missing_ratio}")
     print(f"model: {args.model_path}")
 
-    # plot
     raw = samples[0:4].detach().cpu().numpy()
     mask = mask[0:4].detach().cpu().numpy()
     missed = missed[0:4].detach().cpu().numpy()
@@ -387,12 +432,12 @@ def sample(args):
     plot_seismic_grid(raw, f"{args.output_dir}/raw.png", title="raw")
     plot_seismic_grid(mask, f"{args.output_dir}/mask.png", title="mask")
     plot_seismic_grid(missed, f"{args.output_dir}/missed.png", title="missed")
-    plot_seismic_grid(recon, f"{args.output_dir}/recon.png", title="missed")
-    plot_seismic_grid(raw - recon, f"{args.output_dir}/diff.png", title="missed")
+    plot_seismic_grid(recon, f"{args.output_dir}/recon.png", title="recon")
+    plot_seismic_grid(raw - recon, f"{args.output_dir}/diff.png", title="diff")
 
     for i in range(4):
-        psnr = compute_psnr(raw[i], recon[i], 2.0)
-        print(f"psnr[{i}]: {psnr}]")
+        psnr = compute_psnr(raw[i], recon[i], 1.0)
+        print(f"psnr[{i}]: {psnr}")
 
 
 if __name__ == '__main__':
