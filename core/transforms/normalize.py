@@ -1,3 +1,63 @@
+import torch
+
+
+class Normalize:
+    """
+    Callable transform that normalizes a tensor to [-1, 1].
+
+    Expected input shape: [B, C, ...], ndim >= 4.
+    """
+
+    def __init__(self, mode="per_channel", method="abs", eps=1e-12):
+        self.mode = mode.lower()
+        self.method = method.lower()
+        self.eps = eps
+
+        if self.mode not in {"first_channel", "per_channel", "all_channel", }:
+            raise ValueError("mode must be one of: 'first_channel', 'per_channel', 'all_channel'")
+        
+        if self.method not in {"minmax", "abs", "rms"}:
+            raise ValueError("method must be one of: 'minmax', 'abs', 'rms'")
+
+    def __call__(self, x):
+        if not isinstance(x, torch.Tensor):
+            raise TypeError("x must be a torch.Tensor")
+        if x.ndim < 4:
+            raise ValueError("Input tensor must have shape [B, C, ...] with ndim >= 4")
+
+        spatial_dims = tuple(range(2, x.ndim))
+
+        if self.mode == "first_channel":
+            target = x[:, 0:1, ...]
+            reduce_dims = spatial_dims
+        elif self.mode == "per_channel":
+            target = x
+            reduce_dims = spatial_dims
+        else:
+            target = x
+            reduce_dims = tuple(range(1, x.ndim))
+
+        if self.method == "minmax":
+            mins = target.amin(dim=reduce_dims, keepdim=True)
+            maxs = target.amax(dim=reduce_dims, keepdim=True)
+            normalized_target = 2.0 * (target - mins) / (maxs - mins + self.eps) - 1.0
+        elif self.method == "abs":
+            scale = target.abs().amax(dim=reduce_dims, keepdim=True).clamp_min(self.eps)
+            normalized_target = (target / scale).clamp(-1.0, 1.0)
+        else:
+            rms = torch.sqrt(target.pow(2).mean(dim=reduce_dims, keepdim=True)).clamp_min(
+                self.eps
+            )
+            normalized_target = (target / rms).clamp(-1.0, 1.0)
+
+        if self.mode == "first_channel":
+            result = x.clone()
+            result[:, 0:1, ...] = normalized_target
+            return result
+
+        return normalized_target
+
+
 class MinMaxToMinusOneOne:
     def __init__(self, eps=1e-12):
         self.eps = eps
