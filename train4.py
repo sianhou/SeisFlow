@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torchmetrics import MeanMetric
+from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchvision import transforms
 
 from core.dataset import PatchDataset
@@ -127,6 +128,17 @@ def build_parser():
         help="Beta coefficients for AdamW.",
     )
     parser.add_argument(
+        "--use_ssim_loss",
+        action="store_true",
+        help="Add image-domain SSIM loss computed from predicted images.",
+    )
+    parser.add_argument(
+        "--ssim_loss_weight",
+        default=0.1,
+        type=float,
+        help="Weight for the SSIM loss term.",
+    )
+    parser.add_argument(
         "--output_dir",
         default="./output_dir",
         help="Directory used for logs and checkpoints.",
@@ -180,18 +192,33 @@ def build_model(model_name, device):
     return model
 
 
-def train_one_epoch(model, dataloader, optimizer, scaler, flow_path, device, args, logger, epoch):
+def train_one_epoch(
+        model,
+        dataloader,
+        optimizer,
+        scaler,
+        flow_path,
+        ssim_metric,
+        device,
+        args,
+        logger,
+        epoch,
+):
     gc.collect()
     model.train(True)
 
-    running_loss = MeanMetric().to(device, non_blocking=True)
-    epoch_loss = MeanMetric().to(device, non_blocking=True)
+    running_total_loss = MeanMetric().to(device, non_blocking=True)
+    running_velocity_loss = MeanMetric().to(device, non_blocking=True)
+    running_ssim_loss = MeanMetric().to(device, non_blocking=True)
+    epoch_total_loss = MeanMetric().to(device, non_blocking=True)
     total_steps = len(dataloader)
 
     for step, batch in enumerate(dataloader):
         if step % args.grad_accum_steps == 0:
             optimizer.zero_grad()
-            running_loss.reset()
+            running_total_loss.reset()
+            running_velocity_loss.reset()
+            running_ssim_loss.reset()
 
         clean_images = batch[:, 0].unsqueeze(1).to(device, non_blocking=True)
         mask_ratio = np.random.uniform(*args.mask_ratio_range)
@@ -211,12 +238,24 @@ def train_one_epoch(model, dataloader, optimizer, scaler, flow_path, device, arg
                 timesteps,
                 extra={"concat_conditioning": conditioning},
             )
-            loss = F.mse_loss(predicted_velocity, target_velocity)
+            velocity_loss = F.mse_loss(predicted_velocity, target_velocity)
 
-        running_loss.update(loss)
-        epoch_loss.update(loss)
+            total_loss = velocity_loss
+            ssim_loss = torch.zeros((), device=device)
+            if args.use_ssim_loss:
+                timesteps_reshaped = timesteps.view(-1, 1, 1, 1)
+                predicted_images = noisy_images + (1.0 - timesteps_reshaped) * predicted_velocity
+                ssim_score = ssim_metric(predicted_images, clean_images)
+                ssim_loss = 1.0 - ssim_score
+                total_loss = total_loss + args.ssim_loss_weight * ssim_loss
 
-        loss = loss / args.grad_accum_steps
+        running_total_loss.update(total_loss.detach())
+        running_velocity_loss.update(velocity_loss.detach())
+        if args.use_ssim_loss:
+            running_ssim_loss.update(ssim_loss.detach())
+        epoch_total_loss.update(total_loss.detach())
+
+        loss = total_loss / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
         scaler(
             loss,
@@ -226,12 +265,21 @@ def train_one_epoch(model, dataloader, optimizer, scaler, flow_path, device, arg
         )
 
         learning_rate = optimizer.param_groups[0]["lr"]
-        logger.info(
-            f"Epoch {epoch + 1} [{step + 1}/{total_steps}] "
-            f"loss={running_loss.compute():.6f}, lr={learning_rate:.2e}"
-        )
+        if args.use_ssim_loss:
+            logger.info(
+                f"Epoch {epoch + 1} [{step + 1}/{total_steps}] "
+                f"total_loss={running_total_loss.compute():.6f}, "
+                f"velocity_loss={running_velocity_loss.compute():.6f}, "
+                f"ssim_loss={running_ssim_loss.compute():.6f}, "
+                f"lr={learning_rate:.2e}"
+            )
+        else:
+            logger.info(
+                f"Epoch {epoch + 1} [{step + 1}/{total_steps}] "
+                f"loss={running_total_loss.compute():.6f}, lr={learning_rate:.2e}"
+            )
 
-    return epoch_loss.compute().item()
+    return epoch_total_loss.compute().item()
 
 
 def save_checkpoint(model, output_dir, epoch):
@@ -306,6 +354,9 @@ def main(args):
 
     scaler = AMPGradScaler()
     flow_path = CondOTProbPath()
+    ssim_metric = None
+    if args.use_ssim_loss:
+        ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
 
     logger.info("Start training")
     start_time = time.time()
@@ -320,6 +371,7 @@ def main(args):
             optimizer=optimizer,
             scaler=scaler,
             flow_path=flow_path,
+            ssim_metric=ssim_metric,
             device=device,
             args=args,
             logger=logger,
