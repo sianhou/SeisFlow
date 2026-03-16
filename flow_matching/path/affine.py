@@ -256,5 +256,6 @@ class CondOTProbPath(AffineProbPath):
         \alpha_t = t \quad \text{and} \quad \sigma_t = 1 - t.
     """
 
-    def __init__(self):
-        self.scheduler = CondOTScheduler()
+    def __init__(self, scheduler: Scheduler = CondOTScheduler()):
+        super().__init__(scheduler)
+        self.scheduler = scheduler

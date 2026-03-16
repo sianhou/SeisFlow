@@ -8,7 +8,7 @@ from torchvision import transforms
 
 from core.dataset import SegyDataset, PatchDataset
 from core.patching import extract_overlapping_patches_2d
-from core.transforms import SliceLastDimension
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
 
 
 @dataclass
@@ -33,6 +33,9 @@ def build_sample_transform(args):
         transform_list.append(
             transforms.Resize((args.resize[0], args.resize[1]))
         )
+
+    transform_list.append(ClipFirstChannel(-2, 2))
+    transform_list.append(ScaleFirstChannel(0.5))
 
     if not transform_list:
         return None

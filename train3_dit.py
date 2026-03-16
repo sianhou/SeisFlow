@@ -331,16 +331,16 @@ def sample(args):
     # fix the seed for reproducibility
     set_random_seed(args.seed)
 
-    # # model
-    # model = DiT(**MODEL_CONFIGS["simple_dit"])
-    # model.load_state_dict(torch.load(args.model_path, map_location=device))
-    #
-    # cfg_scaled_model = CFGScaledModel(model=model)
-    # cfg_scaled_model.to(device)
-    # cfg_scaled_model.train(False)
-    #
-    # # solver
-    # solver = ODESolver(velocity_model=cfg_scaled_model)
+    # model
+    model = DiT(**MODEL_CONFIGS["simple_dit"])
+    model.load_state_dict(torch.load(args.model_path, map_location=device))
+
+    cfg_scaled_model = CFGScaledModel(model=model)
+    cfg_scaled_model.to(device)
+    cfg_scaled_model.train(False)
+
+    # solver
+    solver = ODESolver(velocity_model=cfg_scaled_model)
 
     # data
     logger.info(f"Initializing Dataset: {args.dataset}")
