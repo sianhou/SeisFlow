@@ -13,6 +13,7 @@ from core.masks.row_mask import generate_random_row_mask
 from core.metrics import compute_psnr
 from core.patching import TensorPatchProcessor
 from core.training import set_random_seed
+from core.transforms.normalize import Normalize
 from core.visualization import plot_seismic_grid
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
@@ -74,19 +75,18 @@ def build_parser():
 def normalize_patch_batch(
         patches: torch.Tensor,
         eps: float = 1e-12,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    patch_mins = patches.amin(dim=(2, 3), keepdim=True)
-    patch_maxs = patches.amax(dim=(2, 3), keepdim=True)
-    normalized = 2.0 * (patches - patch_mins) / (patch_maxs - patch_mins + eps) - 1.0
-    return normalized, patch_mins, patch_maxs
+) -> tuple[torch.Tensor, torch.Tensor]:
+    normalizer = Normalize(mode="per_channel", method="abs", eps=eps)
+    patch_scales = patches.abs().amax(dim=(2, 3), keepdim=True).clamp_min(eps)
+    normalized = normalizer(patches)
+    return normalized, patch_scales
 
 
 def denormalize_patch_batch(
         patches: torch.Tensor,
-        patch_mins: torch.Tensor,
-        patch_maxs: torch.Tensor,
+        patch_scales: torch.Tensor,
 ) -> torch.Tensor:
-    return 0.5 * (patches + 1.0) * (patch_maxs - patch_mins) + patch_mins
+    return patches * patch_scales
 
 
 def validate_args(args):
@@ -133,7 +133,7 @@ def sample_one_shot(
     clean_patches = clean_patches.squeeze(0)
     mask_patches = mask_patches.squeeze(0)
 
-    normalized_clean_patches, patch_mins, patch_maxs = normalize_patch_batch(clean_patches)
+    normalized_clean_patches, patch_scales = normalize_patch_batch(clean_patches)
     normalized_missed_patches = normalized_clean_patches * mask_patches
 
     sampled_patches = solver.sample(
@@ -158,8 +158,7 @@ def sample_one_shot(
     # Use clean patch statistics to map predictions back for evaluation/visualization.
     reconstructed_patches = denormalize_patch_batch(
         reconstructed_normalized_patches,
-        patch_mins,
-        patch_maxs,
+        patch_scales,
     ).unsqueeze(0)
 
     reconstructed_sample = patch_processor.reconstruct_from_overlapping_patches_2d(
@@ -182,7 +181,9 @@ def save_shot_outputs(result, shot_index: int, shot_dir: Path):
     raw = result["raw"][0, 0].detach().cpu().numpy()
     mask = result["mask"][0, 0].detach().cpu().numpy()
     missed = result["missed"][0, 0].detach().cpu().numpy()
-    recon = result["recon"][0, 0].detach().cpu().clamp(-1.0, 1.0).numpy()
+    raw_min = float(raw.min())
+    raw_max = float(raw.max())
+    recon = result["recon"][0, 0].detach().cpu().clamp(raw_min, raw_max).numpy()
     diff = raw - recon
 
     np.savez_compressed(

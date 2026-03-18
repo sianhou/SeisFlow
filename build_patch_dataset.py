@@ -8,7 +8,7 @@ from torchvision import transforms
 
 from core.dataset import SegyDataset, PatchDataset
 from core.patching import extract_overlapping_patches_2d
-from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
+from core.transforms import SliceLastDimension, ClipFirstChannel
 
 
 @dataclass
@@ -35,7 +35,7 @@ def build_sample_transform(args):
         )
 
     transform_list.append(ClipFirstChannel(-2, 2))
-    transform_list.append(ScaleFirstChannel(0.5))
+    # transform_list.append(ScaleFirstChannel(0.5))
 
     if not transform_list:
         return None
@@ -157,7 +157,7 @@ def test_data(args):
 
     test_index = max(0, min(args.test_index, len(pd) - 1))
     patch = pd[test_index]
-    patch_np = patch.squeeze(0).detach().cpu().numpy()
+    patch_np = patch.squeeze(0).detach().clam.cpu().numpy()
 
     print(f"Visualizing patch index: {test_index}")
     print(

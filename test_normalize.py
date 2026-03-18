@@ -140,6 +140,29 @@ def test_normalize_default_configuration():
     assert_in_range(y)
 
 
+def test_normalize_abs_keeps_zero_center():
+    transform = Normalize(mode="per_channel", method="abs")
+    x = torch.tensor(
+        [
+            [
+                [[-4.0, 0.0], [2.0, 4.0]],
+                [[-3.0, 0.0], [1.5, 3.0]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+
+    y = transform(x)
+
+    assert torch.allclose(y[0, 0, 0, 1], torch.tensor(0.0), atol=1e-6)
+    assert torch.allclose(y[0, 1, 0, 1], torch.tensor(0.0), atol=1e-6)
+    assert torch.allclose(y[0, 0, 0, 0], torch.tensor(-1.0), atol=1e-6)
+    assert torch.allclose(y[0, 0, 1, 1], torch.tensor(1.0), atol=1e-6)
+    assert torch.allclose(y[0, 0, 1, 0], torch.tensor(0.5), atol=1e-6)
+    assert torch.allclose(y[0, 1, 1, 0], torch.tensor(0.5), atol=1e-6)
+    assert_in_range(y)
+
+
 def run_all_tests():
     test_normalize_first_channel_minmax()
     test_normalize_perchannel_abs()
@@ -148,6 +171,7 @@ def run_all_tests():
     test_normalize_invalid_mode()
     test_normalize_invalid_method()
     test_normalize_default_configuration()
+    test_normalize_abs_keeps_zero_center()
     print("All Normalize tests passed.")
 
 

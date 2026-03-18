@@ -6,6 +6,8 @@ class Normalize:
     Callable transform that normalizes a tensor to [-1, 1].
 
     Expected input shape: [B, C, ...], ndim >= 4.
+    The "abs" method keeps 0 as the symmetry center by dividing by the
+    maximum absolute value on the selected reduction axes.
     """
 
     def __init__(self, mode="per_channel", method="abs", eps=1e-12):
@@ -59,6 +61,13 @@ class Normalize:
 
 
 class MinMaxToMinusOneOne:
+    """
+    Legacy transform kept for compatibility.
+
+    This class still performs min-max normalization on the first channel.
+    Use Normalize(method="abs") when you want zero-centered symmetric scaling.
+    """
+
     def __init__(self, eps=1e-12):
         self.eps = eps
 
@@ -83,6 +92,13 @@ class MinMaxToMinusOneOne:
 
 
 class PerChannelMinMaxToMinusOneOne:
+    """
+    Legacy transform kept for compatibility.
+
+    This class still performs per-channel min-max normalization.
+    Use Normalize(mode="per_channel", method="abs") for zero-centered scaling.
+    """
+
     def __init__(self, eps=1e-12):
         self.eps = eps
 
