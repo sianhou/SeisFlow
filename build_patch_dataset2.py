@@ -64,10 +64,20 @@ def normalize_patches_per_channel_abs(patches):
 
 
 def create_parser():
-    parser = argparse.ArgumentParser(description="Build patch dataset from SEG-Y shots")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build single-channel seismic patch datasets for WP1. Supports slicing, "
+            "resizing, and custom square patch sizes such as 128, 256, and 512."
+        )
+    )
     parser.add_argument("--segy",
                         help="Input SEG-Y file used to build the patch dataset.")
-    parser.add_argument("--patch_size", default=32, type=int)
+    parser.add_argument(
+        "--patch_size",
+        default=256,
+        type=int,
+        help="Square patch size. WP1 commonly uses 128, 256, or 512.",
+    )
     parser.add_argument("--overlap_size", default=16, type=int)
     parser.add_argument("--output_dir", default="./dataset_train")
     parser.add_argument("--normalize", action="store_true",
@@ -81,7 +91,19 @@ def create_parser():
     return parser
 
 
+def validate_args(args):
+    if args.patch_size <= 0:
+        raise ValueError("--patch_size must be positive.")
+    if args.overlap_size < 0 or args.overlap_size >= args.patch_size:
+        raise ValueError("--overlap_size must be in [0, patch_size).")
+    if args.slice[0] < 0 or args.slice[1] < 0:
+        raise ValueError("--slice values must be non-negative. Use 0 0 to disable.")
+    if args.resize[0] < 0 or args.resize[1] < 0:
+        raise ValueError("--resize values must be non-negative. Use 0 0 to disable.")
+
+
 def build_dataset(args):
+    validate_args(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
     sample_transform = build_sample_transform(args)

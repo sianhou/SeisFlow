@@ -11,21 +11,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-try:
-    import torch.distributed  # noqa: F401
-except ModuleNotFoundError:
-    torch = types.ModuleType("torch")
-    dist = types.SimpleNamespace(
-        is_available=lambda: False,
-        is_initialized=lambda: False,
-        get_rank=lambda: 0,
-    )
-    torch.distributed = dist
-    sys.modules["torch"] = torch
-    sys.modules["torch.distributed"] = dist
+torch = types.ModuleType("torch")
+dist = types.SimpleNamespace(
+    is_available=lambda: False,
+    is_initialized=lambda: False,
+    get_rank=lambda: 0,
+)
+torch.distributed = dist
+sys.modules["torch"] = torch
+sys.modules["torch.distributed"] = dist
 
 
-from core.logging import SimpleLogger2
+from core.logging import LogReader, SimpleLogger2
+from core.logging.logreader import main as logreader_main
 
 
 class SimpleLogger2Test(unittest.TestCase):
@@ -196,13 +194,13 @@ class SimpleLogger2Test(unittest.TestCase):
             self.assertIn("[E] package_numpy:", train_log)
             self.assertIn("[P] ARGPARSE PARAMETERS", train_log)
             self.assertIn("[P] model_name: unet", train_log)
-            self.assertIn("[H] epoch loss lr", train_log)
-            self.assertIn("[L] 1 0.12 0.0001", train_log)
+            self.assertIn("[H] log_index epoch loss lr", train_log)
+            self.assertRegex(train_log, r"\[L\]\s+0\s+1\s+0\.12\s+0\.0001")
 
             valid_log = (run_dir / "valid.log").read_text(encoding="utf-8")
             self.assertIn("[I] GLOBAL PARAMETERS", valid_log)
-            self.assertIn("[H] epoch loss psnr", valid_log)
-            self.assertIn("[L] 1 0.2 30.5", valid_log)
+            self.assertIn("[H] log_index epoch loss psnr", valid_log)
+            self.assertRegex(valid_log, r"\[L\]\s+0\s+1\s+0\.2\s+30\.5")
 
             events_log = (run_dir / "events.log").read_text(encoding="utf-8")
             self.assertIn("[I] event=run_started", events_log)
@@ -255,15 +253,102 @@ class SimpleLogger2Test(unittest.TestCase):
             train_log = (run_dir / "train.log").read_text(encoding="utf-8")
             self.assertLess(
                 train_log.index("[I] GLOBAL PARAMETERS"),
-                train_log.index("[H] epoch loss lr"),
+                train_log.index("[H] log_index epoch loss lr"),
             )
-            self.assertIn("[L] 1 0.12 0.0001", train_log)
+            self.assertRegex(train_log, r"\[L\]\s+0\s+1\s+0\.12\s+0\.0001")
 
             diagnostics_log = (run_dir / "diagnostics.log").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("[H] epoch scope name mean std", diagnostics_log)
-            self.assertIn("[L] 1 grad encoder.weight 0.001 0.02", diagnostics_log)
+            self.assertIn("[H] log_index epoch scope name mean std", diagnostics_log)
+            self.assertRegex(
+                diagnostics_log,
+                r"\[L\]\s+0\s+1\s+grad\s+encoder\.weight\s+0\.001\s+0\.02",
+            )
+
+    def test_log_rows_have_counter_and_fixed_width_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logger = SimpleLogger2(
+                root_dir=temp_dir,
+                run_name="format",
+                run_id="run001",
+                console=False,
+                logs={"train": ["epoch", "loss"]},
+                log_value_width=6,
+            )
+            logger["train"].log(epoch=1, loss=0.12)
+            logger["train"].log(epoch=2, loss=0.11)
+            logger.close()
+
+            train_log = (
+                Path(temp_dir) / "run001_format" / "train.log"
+            ).read_text(encoding="utf-8")
+            table_lines = [
+                line
+                for line in train_log.splitlines()
+                if line.startswith("[H] ") or line.startswith("[L] ")
+            ]
+            self.assertEqual("[H] log_index epoch loss", table_lines[0])
+            self.assertEqual("[L]      0      1   0.12", table_lines[1])
+            self.assertEqual("[L]      1      2   0.11", table_lines[2])
+
+    def test_logreader_indexes_columns_and_exports_column_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logger = SimpleLogger2(
+                root_dir=temp_dir,
+                run_name="reader",
+                run_id="run001",
+                console=False,
+                logs={"train": ["epoch", "loss", "is_best"]},
+            )
+            logger.log_global_params({"ignored": "metadata"})
+            logger.log_system_info(include_git=False, include_packages=False)
+            logger["train"].log(epoch=1, loss=0.12, is_best=False)
+            logger["train"].log(epoch=2, loss=0.11, is_best=True)
+            logger.close()
+
+            run_dir = Path(temp_dir) / "run001_reader"
+            reader = LogReader(run_dir, channel="train")
+            self.assertEqual(["log_index", "epoch", "loss", "is_best"], reader.columns)
+            self.assertEqual([0, 1], reader["log_index"])
+            self.assertEqual([1, 2], reader["epoch"])
+            self.assertEqual([0.12, 0.11], reader["loss"])
+            self.assertEqual([False, True], reader["is_best"])
+            self.assertEqual(
+                {"log_index": 0, "epoch": 1, "loss": 0.12, "is_best": False},
+                reader[0],
+            )
+
+            output_dir = reader.export_columns()
+            self.assertEqual(
+                "0 0\n1 1\n",
+                (output_dir / "log_index.txt").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "0 0.12\n1 0.11\n",
+                (output_dir / "loss.txt").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "0 False\n1 True\n",
+                (output_dir / "is_best.txt").read_text(encoding="utf-8"),
+            )
+
+            cli_output_dir = run_dir / "cli_columns"
+            result = logreader_main(
+                [
+                    "--path",
+                    str(run_dir),
+                    "--channel",
+                    "train",
+                    "--output_dir",
+                    str(cli_output_dir),
+                ]
+            )
+            self.assertEqual(cli_output_dir, result)
+            self.assertEqual(
+                "0 0\n1 1\n",
+                (cli_output_dir / "log_index.txt").read_text(encoding="utf-8"),
+            )
 
     def test_existing_run_directory_requires_overwrite_or_append(self):
         with tempfile.TemporaryDirectory() as temp_dir:

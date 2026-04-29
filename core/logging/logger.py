@@ -306,7 +306,11 @@ class SimpleLogger2(RunLoggerBase):
         console: bool = True,
         logs: Optional[Any] = None,
         event_log: str = "events",
+        log_value_width: int = 10,
     ):
+        if log_value_width < 1:
+            raise ValueError("log_value_width must be >= 1.")
+
         super().__init__(
             root_dir=root_dir,
             run_name=run_name,
@@ -317,7 +321,9 @@ class SimpleLogger2(RunLoggerBase):
             console=console,
         )
         self._headers: Dict[str, List[str]] = {}
+        self._log_counters: Dict[str, int] = {}
         self.event_log = event_log
+        self.log_value_width = log_value_width
         self.log_names, self._configured_headers = self._normalize_logs(logs)
         self._channels: Dict[str, SimpleLogChannel] = {
             name: SimpleLogChannel(self, name) for name in self.log_names
@@ -774,13 +780,18 @@ class SimpleLogger2(RunLoggerBase):
             return
         header = [str(field) for field in fields]
         self._headers[channel] = header
-        self._log(channel, logging.INFO, "[H] " + " ".join(header))
+        self._log(channel, logging.INFO, "[H] " + " ".join(["log_index", *header]))
 
     def _write_log_values(self, channel: str, values: Sequence[Any]):
         if not self._is_main_process():
             return
-        formatted_values = [self._format_value(value) for value in values]
+        log_index = self._log_counters.get(channel, 0)
+        formatted_values = [
+            f"{self._format_value(value):>{self.log_value_width}}"
+            for value in [log_index, *values]
+        ]
         self._log(channel, logging.INFO, "[L] " + " ".join(formatted_values))
+        self._log_counters[channel] = log_index + 1
 
     def _write_prefixed(
         self,
