@@ -1,4 +1,5 @@
 import argparse
+import logging
 import sys
 import tempfile
 import types
@@ -23,339 +24,176 @@ sys.modules["torch.distributed"] = dist
 
 
 from core.logging import LogReader, SimpleLogger2
-from core.logging.logreader import main as logreader_main
+from core.logging.read_log import main as read_log_main
 
 
 class SimpleLogger2Test(unittest.TestCase):
-    def test_writes_visible_demo_run_directory(self):
+    def test_writes_single_visible_demo_log(self):
         demo_root = PROJECT_ROOT / "tests" / "logger2_demo_runs"
         logger = SimpleLogger2(
-            root_dir=demo_root,
-            run_name="visible_demo",
+            output_dir=demo_root,
+            log_id="visible_demo",
+            overwrite=True,
             console=False,
-            logs={
-                "train": [
-                    "epoch",
-                    "loss",
-                    "velocity_loss",
-                    "ssim_loss",
-                    "lr",
-                    "duration_sec",
-                ],
-                "valid": ["epoch", "loss", "psnr", "mae", "is_best"],
-                "diagnostics": [
-                    "epoch",
-                    "scope",
-                    "name",
-                    "mean",
-                    "std",
-                    "nan_count",
-                    "inf_count",
-                ],
-            },
+            logs=["epoch", "loss", "psnr", "mae", "is_best"],
         )
 
-        demo_args = argparse.Namespace(
-            model_name="unet",
-            num_epochs=3,
-            batch_size=8,
-            learning_rate=1e-4,
-            use_ssim_loss=True,
+        logger.log_system_info(include_git=False, include_packages=False)
+        logger.log_argparse_params(
+            argparse.Namespace(model_name="seismic_vae", num_epochs=3)
         )
-        logger.log_system_info()
-        logger.log_argparse_params(demo_args)
-        logger.log_global_params(
-            {
-                "experiment_name": "logger2_visible_demo",
-                "task": "seismic_reconstruction",
-                "epochs": 3,
-                "batch_size": 8,
-                "learning_rate": 1e-4,
-                "dataset": {
-                    "train_path": "data/train_patches",
-                    "valid_path": "data/valid_patches",
-                    "patch_size": [32, 32],
-                },
-                "well_log_curves": {
-                    "GR": "API",
-                    "RHOB": "g/cm3",
-                    "NPHI": "v/v",
-                    "DT": "us/ft",
-                },
-            }
-        )
+        logger.log_global_params({"experiment_name": "logger2_visible_demo"})
 
         for epoch in range(1, 4):
-            logger["train"].log_epoch(
-                epoch,
-                {
-                    "loss": 0.5 / epoch,
-                    "velocity_loss": 0.45 / epoch,
-                    "ssim_loss": 0.05 / epoch,
-                    "lr": 1e-4,
-                    "duration_sec": 12.5 + epoch,
-                },
-            )
-
-            logger["valid"].log_epoch(
-                epoch,
-                {
-                    "loss": 0.62 / epoch,
-                    "psnr": 22.0 + epoch,
-                    "mae": 0.12 / epoch,
-                    "is_best": epoch == 3,
-                },
-            )
-
-            logger["diagnostics"].log(
+            logger.log_train(
                 epoch=epoch,
-                scope="grad",
-                name="encoder.block1.weight",
-                mean=1e-4 / epoch,
-                std=2e-3 / epoch,
-                nan_count=0,
-                inf_count=0,
+                loss=0.5 / epoch,
+                psnr="",
+                mae="",
+                is_best=False,
             )
-
+            logger.log_valid(
+                epoch=epoch,
+                loss=0.62 / epoch,
+                psnr=22.0 + epoch,
+                mae=0.12 / epoch,
+                is_best=epoch == 3,
+            )
             if epoch == 2:
-                logger.log_event(
-                    "checkpoint_saved",
-                    epoch=epoch,
-                    path=f"checkpoints/model_epoch_{epoch:05d}.pth",
-                )
+                logger.log_event("checkpoint_saved", epoch=epoch)
 
-        logger.log_event(
-            "best_model_updated",
-            epoch=3,
-            metric="valid/psnr",
-            value=25.0,
-            path="checkpoints/best.pth",
-        )
         logger.close()
 
         print(f"\nSimpleLogger2 demo run: {logger.run_dir}")
         self.assertTrue(logger.run_dir.is_dir())
-        self.assertTrue((logger.run_dir / "train.log").is_file())
-        self.assertTrue((logger.run_dir / "valid.log").is_file())
-        self.assertTrue((logger.run_dir / "diagnostics.log").is_file())
-        self.assertTrue((logger.run_dir / "events.log").is_file())
+        self.assertTrue((logger.run_dir / "log.txt").is_file())
 
-    def test_creates_separate_run_files_and_records(self):
+    def test_single_log_file_records_info_events_and_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             logger = SimpleLogger2(
-                root_dir=temp_dir,
-                run_name="unit test",
-                run_id="run001",
+                output_dir=temp_dir,
+                log_id="run001",
                 console=False,
+                logs=["epoch", "loss", "lr"],
             )
 
-            logger.log_global_params(
-                {
-                    "epochs": 2,
-                    "batch_size": 4,
-                    "curves": ["GR", "RHOB", "NPHI"],
-                }
-            )
+            logger.log_global_params({"epochs": 2, "batch_size": 4})
             logger.log_system_info(include_git=False)
             logger.log_argparse_params(
-                argparse.Namespace(
-                    model_name="unet",
-                    num_epochs=2,
-                    batch_size=4,
-                    learning_rate=1e-4,
-                )
+                argparse.Namespace(model_name="vae", learning_rate=1e-4)
             )
-            logger.log_train_epoch(1, {"loss": 0.12, "lr": 1e-4})
-            logger.log_valid_epoch(1, {"loss": 0.2, "psnr": 30.5})
-            logger.log_event("checkpoint_saved", path="model_epoch_00001.pth")
+            logger.log_train(epoch=1, loss=0.12, lr=1e-4)
+            logger.log_valid(epoch=1, loss=0.2, lr="")
+            logger.log_event("checkpoint_saved", epoch=1)
+            logger.log_event("nonfinite_grad", level=logging.WARNING, epoch=1)
             logger.close()
 
-            run_dir = Path(temp_dir) / "run001_unit_test"
-            self.assertTrue(run_dir.is_dir())
+            run_dir = Path(temp_dir) / "run001"
+            self.assertEqual({"log.txt"}, {path.name for path in run_dir.iterdir()})
 
-            expected_files = {
-                "train.log",
-                "valid.log",
-                "events.log",
-            }
-            actual_files = {path.name for path in run_dir.iterdir()}
-            self.assertEqual(expected_files, actual_files)
-
-            train_log = (run_dir / "train.log").read_text(encoding="utf-8")
-            self.assertIn("[I] GLOBAL PARAMETERS", train_log)
-            self.assertIn("[I] epochs: 2", train_log)
-            self.assertIn("[I] batch_size: 4", train_log)
-            self.assertIn("[I] curves: ['GR', 'RHOB', 'NPHI']", train_log)
-            self.assertIn("[E] SYSTEM INFORMATION", train_log)
-            self.assertIn("[E] python_version:", train_log)
-            self.assertIn("[E] platform:", train_log)
-            self.assertIn("[E] package_selection: deep_learning_defaults", train_log)
-            self.assertIn("[E] package_torch:", train_log)
-            self.assertIn("[E] package_numpy:", train_log)
-            self.assertIn("[P] ARGPARSE PARAMETERS", train_log)
-            self.assertIn("[P] model_name: unet", train_log)
-            self.assertIn("[H] log_index epoch loss lr", train_log)
-            self.assertRegex(train_log, r"\[L\]\s+0\s+1\s+0\.12\s+0\.0001")
-
-            valid_log = (run_dir / "valid.log").read_text(encoding="utf-8")
-            self.assertIn("[I] GLOBAL PARAMETERS", valid_log)
-            self.assertIn("[H] log_index epoch loss psnr", valid_log)
-            self.assertRegex(valid_log, r"\[L\]\s+0\s+1\s+0\.2\s+30\.5")
-
-            events_log = (run_dir / "events.log").read_text(encoding="utf-8")
-            self.assertIn("[I] event=run_started", events_log)
-            self.assertIn("[I] event=global_params_written", events_log)
-            self.assertIn("[I] event=system_info_written", events_log)
-            self.assertIn("[I] event=argparse_params_written", events_log)
-            self.assertIn("[I] event=checkpoint_saved", events_log)
-
-    def test_configurable_log_channels_can_be_indexed(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            logger = SimpleLogger2(
-                root_dir=temp_dir,
-                run_name="multi log",
-                run_id="run001",
-                console=False,
-                logs={
-                    "train": ["epoch", "loss", "lr"],
-                    "valid": ["epoch", "loss", "psnr"],
-                    "diagnostics": ["epoch", "scope", "name", "mean", "std"],
-                },
-            )
-
-            self.assertIn("train", logger)
-            self.assertIn("valid", logger)
-            self.assertIn("diagnostics", logger)
-
-            logger.log_global_params({"epochs": 1})
-            logger.log_system_info(include_git=False, include_packages=False)
-            logger.log_argparse_params(
-                argparse.Namespace(model_name="unet", batch_size=8)
-            )
-            logger["train"].log_epoch(1, loss=0.12, lr=1e-4)
-            logger["valid"].log_epoch(1, loss=0.2, psnr=30.5)
-            logger["diagnostics"].log(
-                epoch=1,
-                scope="grad",
-                name="encoder.weight",
-                mean=0.001,
-                std=0.02,
-            )
-            logger.close()
-
-            run_dir = Path(temp_dir) / "run001_multi_log"
-            actual_files = {path.name for path in run_dir.iterdir()}
-            self.assertEqual(
-                {"train.log", "valid.log", "diagnostics.log", "events.log"},
-                actual_files,
-            )
-
-            train_log = (run_dir / "train.log").read_text(encoding="utf-8")
-            self.assertLess(
-                train_log.index("[I] GLOBAL PARAMETERS"),
-                train_log.index("[H] log_index epoch loss lr"),
-            )
-            self.assertRegex(train_log, r"\[L\]\s+0\s+1\s+0\.12\s+0\.0001")
-
-            diagnostics_log = (run_dir / "diagnostics.log").read_text(
-                encoding="utf-8"
-            )
-            self.assertIn("[H] log_index epoch scope name mean std", diagnostics_log)
-            self.assertRegex(
-                diagnostics_log,
-                r"\[L\]\s+0\s+1\s+grad\s+encoder\.weight\s+0\.001\s+0\.02",
-            )
+            log_text = (run_dir / "log.txt").read_text(encoding="utf-8")
+            self.assertIn("[I] GLOBAL PARAMETERS", log_text)
+            self.assertIn("[I] SYSTEM INFORMATION", log_text)
+            self.assertIn("[I] ARGPARSE PARAMETERS", log_text)
+            self.assertIn("[I] info | event=run_started", log_text)
+            self.assertIn("[I] info | event=checkpoint_saved | epoch=1", log_text)
+            self.assertIn("[I] warning | event=nonfinite_grad | epoch=1", log_text)
+            self.assertIn("\n\n[I] SYSTEM INFORMATION", log_text)
+            self.assertIn("\n\n[I] ARGPARSE PARAMETERS", log_text)
+            self.assertIn("\n\n[H] log_index epoch loss lr timestamp", log_text)
+            self.assertRegex(log_text, r"\[T\]\s+0\s+1\s+0\.12\s+0\.0001")
+            self.assertRegex(log_text, r"\[V\]\s+1\s+1\s+0\.2")
 
     def test_log_rows_have_counter_and_fixed_width_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             logger = SimpleLogger2(
-                root_dir=temp_dir,
-                run_name="format",
-                run_id="run001",
+                output_dir=temp_dir,
+                log_id="run001",
                 console=False,
-                logs={"train": ["epoch", "loss"]},
+                logs=["epoch", "loss"],
                 log_value_width=6,
             )
-            logger["train"].log(epoch=1, loss=0.12)
-            logger["train"].log(epoch=2, loss=0.11)
+            logger.log_train(epoch=1, loss=0.12)
+            logger.log_train(epoch=2, loss=0.11)
             logger.close()
 
-            train_log = (
-                Path(temp_dir) / "run001_format" / "train.log"
-            ).read_text(encoding="utf-8")
+            log_text = (Path(temp_dir) / "run001" / "log.txt").read_text(
+                encoding="utf-8"
+            )
             table_lines = [
                 line
-                for line in train_log.splitlines()
-                if line.startswith("[H] ") or line.startswith("[L] ")
+                for line in log_text.splitlines()
+                if line.startswith("[H] ")
+                or line.startswith("[T] ")
+                or line.startswith("[V] ")
             ]
-            self.assertEqual("[H] log_index epoch loss", table_lines[0])
-            self.assertEqual("[L]      0      1   0.12", table_lines[1])
-            self.assertEqual("[L]      1      2   0.11", table_lines[2])
+            self.assertEqual("[H] log_index epoch loss timestamp", table_lines[0])
+            self.assertRegex(
+                table_lines[1],
+                r"^\[T\]\s+0\s+1\s+0\.12\s+\d+$",
+            )
+            self.assertRegex(
+                table_lines[2],
+                r"^\[T\]\s+1\s+2\s+0\.11\s+\d+$",
+            )
 
-    def test_logreader_indexes_columns_and_exports_column_files(self):
+    def test_read_log_filters_by_line_prefix_and_exports_column_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             logger = SimpleLogger2(
-                root_dir=temp_dir,
-                run_name="reader",
-                run_id="run001",
+                output_dir=temp_dir,
+                log_id="run001",
                 console=False,
-                logs={"train": ["epoch", "loss", "is_best"]},
+                logs=["epoch", "loss", "is_best"],
             )
             logger.log_global_params({"ignored": "metadata"})
-            logger.log_system_info(include_git=False, include_packages=False)
-            logger["train"].log(epoch=1, loss=0.12, is_best=False)
-            logger["train"].log(epoch=2, loss=0.11, is_best=True)
+            logger.log_train(epoch=1, loss=0.12, is_best=False)
+            logger.log_valid(epoch=1, loss=0.2, is_best=False)
+            logger.log_train(epoch=2, loss=0.11, is_best=True)
             logger.close()
 
-            run_dir = Path(temp_dir) / "run001_reader"
-            reader = LogReader(run_dir, channel="train")
-            self.assertEqual(["log_index", "epoch", "loss", "is_best"], reader.columns)
-            self.assertEqual([0, 1], reader["log_index"])
+            run_dir = Path(temp_dir) / "run001"
+            reader = LogReader(run_dir, channel="T")
+            self.assertEqual(
+                ["log_index", "epoch", "loss", "is_best", "timestamp"],
+                reader.columns,
+            )
+            self.assertEqual([0, 2], reader["log_index"])
             self.assertEqual([1, 2], reader["epoch"])
             self.assertEqual([0.12, 0.11], reader["loss"])
             self.assertEqual([False, True], reader["is_best"])
-            self.assertEqual(
-                {"log_index": 0, "epoch": 1, "loss": 0.12, "is_best": False},
-                reader[0],
-            )
 
             output_dir = reader.export_columns()
             self.assertEqual(
-                "0 0\n1 1\n",
+                "0 0\n2 2\n",
                 (output_dir / "log_index.txt").read_text(encoding="utf-8"),
             )
             self.assertEqual(
-                "0 0.12\n1 0.11\n",
+                "0 0.12\n2 0.11\n",
                 (output_dir / "loss.txt").read_text(encoding="utf-8"),
-            )
-            self.assertEqual(
-                "0 False\n1 True\n",
-                (output_dir / "is_best.txt").read_text(encoding="utf-8"),
             )
 
             cli_output_dir = run_dir / "cli_columns"
-            result = logreader_main(
+            result = read_log_main(
                 [
                     "--path",
-                    str(run_dir),
+                    str(run_dir / "log.txt"),
                     "--channel",
-                    "train",
+                    "T",
                     "--output_dir",
                     str(cli_output_dir),
                 ]
             )
             self.assertEqual(cli_output_dir, result)
             self.assertEqual(
-                "0 0\n1 1\n",
+                "0 0\n2 2\n",
                 (cli_output_dir / "log_index.txt").read_text(encoding="utf-8"),
             )
 
     def test_existing_run_directory_requires_overwrite_or_append(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             logger = SimpleLogger2(
-                root_dir=temp_dir,
-                run_name="same",
-                run_id="run001",
+                output_dir=temp_dir,
+                log_id="run001",
                 console=False,
             )
             logger.log_event("first_run")
@@ -363,29 +201,25 @@ class SimpleLogger2Test(unittest.TestCase):
 
             with self.assertRaises(FileExistsError):
                 SimpleLogger2(
-                    root_dir=temp_dir,
-                    run_name="same",
-                    run_id="run001",
+                    output_dir=temp_dir,
+                    log_id="run001",
                     console=False,
                 )
 
             logger = SimpleLogger2(
-                root_dir=temp_dir,
-                run_name="same",
-                run_id="run001",
+                output_dir=temp_dir,
+                log_id="run001",
                 append=True,
                 console=False,
             )
             logger.log_event("second_run")
             logger.close()
 
-            events_log = (
-                Path(temp_dir) / "run001_same" / "events.log"
-            ).read_text(
+            log_text = (Path(temp_dir) / "run001" / "log.txt").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("[I] event=first_run", events_log)
-            self.assertIn("[I] event=second_run", events_log)
+            self.assertIn("[I] info | event=first_run", log_text)
+            self.assertIn("[I] info | event=second_run", log_text)
 
 
 if __name__ == "__main__":

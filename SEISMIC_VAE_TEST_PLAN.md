@@ -201,7 +201,7 @@ python train_seismic_vae.py \
   --latent_size 64 \
   --hidden_channels 32 \
   --output_dir output_seismic_vae \
-  --run_name vae_c4_n64
+  --log_id vae_c4_n64
 ```
 
 Latent 形状：
@@ -240,7 +240,7 @@ python train_seismic_vae.py \
   --latent_size 32 \
   --hidden_channels 32 \
   --output_dir output_seismic_vae \
-  --run_name vae_c4_n32
+  --log_id vae_c4_n32
 ```
 
 Latent 形状：
@@ -279,7 +279,7 @@ python train_seismic_vae.py \
   --latent_size 16 \
   --hidden_channels 32 \
   --output_dir output_seismic_vae \
-  --run_name vae_c4_n16
+  --log_id vae_c4_n16
 ```
 
 Latent 形状：
@@ -320,7 +320,7 @@ python train_seismic_vae.py \
   --latent_size 32 \
   --hidden_channels 32 \
   --output_dir output_seismic_vae \
-  --run_name vae_c8_n32
+  --log_id vae_c8_n32
 ```
 
 Latent 形状：
@@ -356,7 +356,7 @@ python train_seismic_vae.py \
   --latent_size 16 \
   --hidden_channels 32 \
   --output_dir output_seismic_vae \
-  --run_name vae_c8_n16
+  --log_id vae_c8_n16
 ```
 
 Latent 形状：
@@ -382,57 +382,28 @@ Latent 形状：
 主要日志文件：
 
 ```text
-train.log
-epoch.log
-batch_stats.log
-latent.log
-reconstruction.log
-diagnostics.log
-parameters.log
-events.log
+log.txt
 ```
 
-重点查看：
+`log.txt` 中所有信息、事件和训练/验证指标写在同一个文件：
 
-- `train.log`
+- `[I]`：参数、环境信息、事件；事件行会在 `[I]` 后标注 `info`、`warning`、`error` 等级别；
+- `[H]`：指标表头；
+- `[T]`：训练 step 指标；
+- `[V]`：验证指标；
+- 其他一字符行头可用于扩展。
+
+重点查看 `[T]` 行：
+
   - total loss；
-  - L1 loss；
   - MSE loss；
   - KL loss；
-  - gradient loss；
-  - frequency loss；
   - MAE；
   - RMSE；
   - PSNR；
   - learning rate；
   - grad norm；
   - CUDA memory usage。
-
-- `epoch.log`
-  - epoch 平均 loss；
-  - epoch 训练耗时；
-  - samples/sec；
-  - checkpoint path。
-
-- `latent.log`
-  - `z`、`mu`、`logvar` 的统计；
-  - mean；
-  - std；
-  - min / max；
-  - RMS；
-  - saturation fraction；
-  - NaN / Inf 数量。
-
-- `reconstruction.log`
-  - 样本级重建误差；
-  - 输入和重建振幅范围；
-  - sample MSE；
-  - sample PSNR。
-
-- `parameters.log`
-  - 参数统计；
-  - gradient norm；
-  - gradient NaN / Inf 数量。
 
 ## 7. 评估指标
 

@@ -12,7 +12,7 @@ from core.dataset import PatchDataset
 from core.logging.logger import SimpleLogger2
 from core.training import count_model_parameters, set_random_seed
 from core.transforms.normalize import Normalize
-from models.seismic_vae import SeismicSpatialVAE
+from models.seismic_vae import SeismicSpatialVAE, kl_divergence
 
 
 class NormalizePatch:
@@ -44,8 +44,7 @@ def build_parser():
         help="Max gradient norm. Use 0 or a negative value to disable clipping.",
     )
     parser.add_argument("--checkpoint_interval", default=10, type=int)
-    parser.add_argument("--run_name", default="seismic_vae")
-    parser.add_argument("--run_id", default=None)
+    parser.add_argument("--log_id", default=None)
     parser.add_argument("--log_console", action="store_true")
     parser.add_argument("--pin_memory", action="store_true")
     parser.add_argument("--normalize", action="store_true")
@@ -72,7 +71,13 @@ def build_parser():
         default=None,
         help="Optional encoder channel multipliers. Defaults to powers of two.",
     )
-    parser.add_argument("--autoencoder", action="store_true", help="Disable sampling/KL.")
+    parser.add_argument("--autoencoder", action="store_true", help="Disable latent sampling; use z=mu.")
+    parser.add_argument(
+        "--kl_weight",
+        default=0.0,
+        type=float,
+        help="KL loss weight. Use 0 to disable KL regularization.",
+    )
     return parser
 
 
@@ -93,9 +98,12 @@ def build_dataloader(args):
 def compute_loss(outputs, clean_images, args):
     recon = outputs["recon"]
     mse = F.mse_loss(recon, clean_images)
+    kl = kl_divergence(outputs["mu"], outputs["logvar"])
+    total = mse + args.kl_weight * kl
     return {
         "mse": mse,
-        "total": mse,
+        "kl": kl,
+        "total": total,
     }
 
 
@@ -117,6 +125,16 @@ def cuda_max_allocated_mb(device):
     if device.type != "cuda" or not torch.cuda.is_available():
         return 0.0
     return torch.cuda.max_memory_allocated(device) / 1024**2
+
+
+def training_mode_name(args):
+    if args.autoencoder and args.kl_weight > 0:
+        return "autoencoder_kl_regularized"
+    if args.autoencoder:
+        return "autoencoder"
+    if args.kl_weight > 0:
+        return "weak_kl_vae"
+    return "sampled_vae_no_kl"
 
 
 def save_checkpoint(model, optimizer, args, epoch, output_dir):
@@ -141,6 +159,8 @@ def validate_args(args):
         raise ValueError("latent_size must be one of: 16, 32, 64.")
     if args.input_size % args.latent_size != 0:
         raise ValueError("input_size must be divisible by latent_size.")
+    if args.kl_weight < 0:
+        raise ValueError("kl_weight must be non-negative.")
     compression = args.input_size // args.latent_size
     if compression < 1 or compression & (compression - 1) != 0:
         raise ValueError("input_size / latent_size must be a power of two.")
@@ -150,32 +170,32 @@ def main(args):
     validate_args(args)
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     logger = SimpleLogger2(
-        root_dir=args.output_dir,
-        run_name=args.run_name,
-        run_id=args.run_id,
+        output_dir=args.output_dir,
+        log_id=args.log_id,
         overwrite=True,
         console=args.log_console,
-        logs={
-            "train": [
-                "epoch",
-                "step",
-                "global_step",
-                "optimizer_step",
-                "batch_size",
-                "loss",
-                "mae",
-                "mse",
-                "rmse",
-                "psnr",
-                "lr",
-                "grad_norm",
-                "nonfinite_grad_norm",
-                "cuda_max_allocated_mb",
-                "step_time_sec",
-                "total_time_sec",
-                "samples_per_sec",
-            ],
-        },
+        logs=[
+            "epoch",
+            "step",
+            "global_step",
+            "optimizer_step",
+            "batch_size",
+            "loss",
+            "mse_loss",
+            "kl_loss",
+            "kl_weight",
+            "mae",
+            "mse",
+            "rmse",
+            "psnr",
+            "lr",
+            "grad_norm",
+            "nonfinite_grad_norm",
+            "cuda_max_allocated_mb",
+            "step_time_sec",
+            "total_time_sec",
+            "samples_per_sec",
+        ],
     )
     logger.log_event("script_started", job_dir=os.path.dirname(os.path.realpath(__file__)))
     logger.log_argparse_params(args)
@@ -224,7 +244,7 @@ def main(args):
             "latent_shape": [args.latent_channels, args.latent_size, args.latent_size],
             "hidden_channels": args.hidden_channels,
             "channel_multipliers": args.channel_multipliers,
-            "mode": "autoencoder" if args.autoencoder else "weak_kl_vae",
+            "mode": training_mode_name(args),
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -233,7 +253,8 @@ def main(args):
             "adam_betas": args.adam_betas,
             "grad_accum_steps": args.grad_accum_steps,
             "clip_grad": args.clip_grad,
-            "loss": "mse_l2_only",
+            "loss": "mse_plus_kl",
+            "kl_weight": args.kl_weight,
             "amp": False,
             "model": str(model),
         }
@@ -310,13 +331,16 @@ def main(args):
                 nonfinite_grad_norm = 0 if math.isfinite(grad_norm_value) else 1
 
             step_time = time.time() - step_start_time
-            logger["train"].log(
+            logger.log_train(
                 epoch=epoch + 1,
                 step=step + 1,
                 global_step=global_step,
                 optimizer_step=optimizer_step,
                 batch_size=int(batch.shape[0]),
                 loss=float(losses["total"].detach().cpu()),
+                mse_loss=float(losses["mse"].detach().cpu()),
+                kl_loss=float(losses["kl"].detach().cpu()),
+                kl_weight=args.kl_weight,
                 mae=metrics["mae"],
                 mse=metrics["mse"],
                 rmse=metrics["rmse"],

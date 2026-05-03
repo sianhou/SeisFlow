@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import re
+import time
 from datetime import datetime
 from getpass import getuser
 from importlib import metadata
@@ -120,9 +121,8 @@ class RunLoggerBase:
 
     def __init__(
         self,
-        root_dir: str = "./results",
-        run_name: Optional[str] = None,
-        run_id: Optional[str] = None,
+        output_dir: str = "./results",
+        log_id: Optional[str] = None,
         level: int = logging.INFO,
         overwrite: bool = False,
         append: bool = False,
@@ -131,19 +131,14 @@ class RunLoggerBase:
         if overwrite and append:
             raise ValueError("overwrite and append cannot both be True.")
 
-        self.root_dir = Path(root_dir)
-        self.run_name = run_name
-        self.run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.output_dir = Path(output_dir)
+        self.log_id = log_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.level = level
         self.overwrite = overwrite
         self.append = append
         self.console = console
         self._loggers: Dict[str, logging.Logger] = {}
-
-        folder_name = self.run_id
-        if run_name:
-            folder_name = f"{self.run_id}_{self._safe_name(run_name)}"
-        self.run_dir = self.root_dir / folder_name
+        self.run_dir = self.output_dir / self.log_id
 
         if self._is_main_process():
             self._prepare_run_dir()
@@ -161,7 +156,7 @@ class RunLoggerBase:
             if has_contents and not self.overwrite and not self.append:
                 raise FileExistsError(
                     f"Run directory '{self.run_dir}' already exists. "
-                    "Set overwrite=True or append=True, or use a new run_id."
+                    "Set overwrite=True or append=True, or use a new log_id."
                 )
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -180,7 +175,7 @@ class RunLoggerBase:
             return self._loggers[channel]
 
         logger_name = (
-            f"{self.__class__.__name__}.{self.run_id}.{channel}.{id(self)}"
+            f"{self.__class__.__name__}.{self.log_id}.{channel}.{id(self)}"
         )
         logger = logging.getLogger(logger_name)
         logger.setLevel(self.level)
@@ -246,128 +241,71 @@ class RunLoggerBase:
         self._loggers.clear()
 
 
-class SimpleLogChannel:
-    """
-    One LAS-like log channel inside SimpleLogger2.
-    """
-
-    def __init__(self, parent: "SimpleLogger2", name: str):
-        self.parent = parent
-        self.name = name
-
-    def info(self, message: str):
-        self.parent._write_info(self.name, message)
-
-    def header(self, fields: Sequence[str]):
-        self.parent._write_header(self.name, fields)
-
-    def log(self, **fields: Any):
-        self.parent._log_curve_row(self.name, None, fields)
-
-    def log_epoch(
-        self,
-        epoch: int,
-        metrics: Optional[Mapping[str, Any]] = None,
-        **fields: Any,
-    ):
-        record = {"epoch": epoch}
-        if metrics:
-            record.update(metrics)
-        record.update(fields)
-        self.log(**record)
-
-
 class SimpleLogger2(RunLoggerBase):
     """
-    Run-scoped training logger with LAS-like train, valid, and event logs.
+    Run-scoped training logger with one LAS-like log file.
 
     By default, files created in each run directory:
-        - train.log
-        - valid.log
-        - events.log
+        - log.txt
 
     Example:
-        logger = SimpleLogger2(root_dir="./logs", run_name="unet")
+        logger = SimpleLogger2(output_dir="./logs", log_id="unet")
         logger.log_global_params({"epochs": 100, "batch_size": 16})
-        logger.log_train_epoch(1, {"loss": 0.23, "lr": 1e-4})
-        logger.log_valid_epoch(1, {"loss": 0.31, "psnr": 24.7})
-        logger["train"].log_epoch(2, {"loss": 0.19, "lr": 1e-4})
+        logger.log_train(epoch=1, loss=0.23, lr=1e-4)
+        logger.log_valid(epoch=1, loss=0.31, psnr=24.7)
         logger.log_event("checkpoint_saved", path="model_epoch_00001.pth")
     """
 
     def __init__(
         self,
-        root_dir: str = "./results",
-        run_name: Optional[str] = None,
-        run_id: Optional[str] = None,
+        output_dir: str = "./results",
+        log_id: Optional[str] = None,
         level: int = logging.INFO,
         overwrite: bool = False,
         append: bool = False,
         console: bool = True,
         logs: Optional[Any] = None,
-        event_log: str = "events",
+        log_file: str = "log.txt",
         log_value_width: int = 10,
     ):
         if log_value_width < 1:
             raise ValueError("log_value_width must be >= 1.")
 
         super().__init__(
-            root_dir=root_dir,
-            run_name=run_name,
-            run_id=run_id,
+            output_dir=output_dir,
+            log_id=log_id,
             level=level,
             overwrite=overwrite,
             append=append,
             console=console,
         )
-        self._headers: Dict[str, List[str]] = {}
-        self._log_counters: Dict[str, int] = {}
-        self.event_log = event_log
+        self._header: List[str] = []
+        self._log_counter = 0
+        self.log_name = "log"
+        self.log_file = log_file
         self.log_value_width = log_value_width
-        self.log_names, self._configured_headers = self._normalize_logs(logs)
-        self._channels: Dict[str, SimpleLogChannel] = {
-            name: SimpleLogChannel(self, name) for name in self.log_names
-        }
+        self._configured_header = self._normalize_logs(logs)
 
         if self._is_main_process():
-            for name in self.log_names:
-                self._build_logger(name, f"{name}.log")
-            self._build_logger(self.event_log, f"{self.event_log}.log")
+            self._build_logger(self.log_name, self.log_file)
             self.log_event(
                 "run_started",
-                run_id=self.run_id,
-                run_name=self.run_name,
+                log_id=self.log_id,
                 run_dir=str(self.run_dir),
             )
 
     @staticmethod
     def _normalize_logs(logs: Optional[Any]):
         if logs is None:
-            return ["train", "valid"], {}
-
-        if isinstance(logs, Mapping):
-            names = []
-            headers = {}
-            for name, header in logs.items():
-                channel_name = SimpleLogger2._validate_log_name(str(name))
-                if channel_name not in names:
-                    names.append(channel_name)
-                if header:
-                    headers[channel_name] = [str(field) for field in header]
-            return names, headers
+            return []
 
         if isinstance(logs, str):
-            return [SimpleLogger2._validate_log_name(logs)], {}
+            return [logs]
 
         if isinstance(logs, Iterable):
-            names = []
-            for name in logs:
-                channel_name = SimpleLogger2._validate_log_name(str(name))
-                if channel_name not in names:
-                    names.append(channel_name)
-            return names, {}
+            return [str(field) for field in logs]
 
-        raise TypeError("logs must be None, a string, a sequence, or a mapping.")
+        raise TypeError("logs must be None, a string, or one sequence of fields.")
 
     @staticmethod
     def _validate_log_name(name: str) -> str:
@@ -376,14 +314,14 @@ class SimpleLogger2(RunLoggerBase):
             raise ValueError("Log name cannot be empty.")
         return safe_name
 
-    def __getitem__(self, name: str) -> SimpleLogChannel:
-        return self._channels[self._validate_log_name(name)]
+    def log(self, prefix: str = "L", **fields: Any):
+        self._log_curve_row(prefix, fields)
 
-    def __contains__(self, name: str) -> bool:
-        return self._validate_log_name(name) in self._channels
+    def log_train(self, prefix: str = "T", **fields: Any):
+        self.log(prefix=prefix, **fields)
 
-    def keys(self):
-        return self._channels.keys()
+    def log_valid(self, prefix: str = "V", **fields: Any):
+        self.log(prefix=prefix, **fields)
 
     def log_global_params(
         self,
@@ -393,13 +331,12 @@ class SimpleLogger2(RunLoggerBase):
         if not self._is_main_process():
             return
 
-        for name in self.log_names:
-            self._write_info(name, title)
+        self._write_info(title)
         for key, value in params.items():
             info_line = f"{key}: {self._format_value(value)}"
-            for name in self.log_names:
-                self._write_info(name, info_line)
+            self._write_info(info_line)
         self.log_event("global_params_written")
+        self._write_info_blank_line()
 
     def log_system_info(
         self,
@@ -421,8 +358,9 @@ class SimpleLogger2(RunLoggerBase):
             include_all_packages=include_all_packages,
             package_names=package_names,
         )
-        self.log_info_block(title, info, prefix="E")
+        self.log_info_block(title, info)
         self.log_event("system_info_written")
+        self._write_info_blank_line()
 
     def log_argparse_params(
         self,
@@ -436,8 +374,9 @@ class SimpleLogger2(RunLoggerBase):
         simple objects with __dict__ are also accepted for convenience.
         """
         params = self._normalize_params(args)
-        self.log_info_block(title, params, prefix="P")
+        self.log_info_block(title, params)
         self.log_event("argparse_params_written")
+        self._write_info_blank_line()
 
     def log_params(
         self,
@@ -445,26 +384,23 @@ class SimpleLogger2(RunLoggerBase):
         title: str = "PARAMETERS",
     ):
         """
-        Record manually supplied run parameters with [P] lines.
+        Record manually supplied run parameters with [I] lines.
         """
-        self.log_info_block(title, self._normalize_params(params), prefix="P")
+        self.log_info_block(title, self._normalize_params(params))
         self.log_event("params_written")
 
     def log_info_block(
         self,
         title: str,
         params: Mapping[str, Any],
-        prefix: str = "I",
     ):
         if not self._is_main_process():
             return
 
-        for name in self.log_names:
-            self._write_prefixed_message(name, prefix, title)
+        self._write_info(title)
         for key, value in params.items():
             info_line = f"{key}: {self._format_value(value)}"
-            for name in self.log_names:
-                self._write_prefixed_message(name, prefix, info_line)
+            self._write_info(info_line)
 
     @staticmethod
     def _normalize_params(params: Any) -> Mapping[str, Any]:
@@ -713,122 +649,107 @@ class SimpleLogger2(RunLoggerBase):
             info["current_cuda_device"] = cuda.current_device()
         return info
 
-    def log_train(self, message: Optional[str] = None, **fields: Any):
-        self._log_curve_row("train", message, fields)
-
-    def log_valid(self, message: Optional[str] = None, **fields: Any):
-        self._log_curve_row("valid", message, fields)
-
     def log_event(
         self,
         event: str,
+        prefix: str = "I",
         level: int = logging.INFO,
+        status: Optional[str] = None,
         **fields: Any,
     ):
         event_fields = {"event": event}
         event_fields.update(fields)
-        self._write_prefixed(self.event_log, "I", event_fields, level=level)
+        status_name = status or logging.getLevelName(level).lower()
+        self._write_prefixed(prefix, event_fields, level=level, status=status_name)
 
-    def log_train_header(self, fields: Sequence[str]):
-        self._write_header("train", fields)
-
-    def log_valid_header(self, fields: Sequence[str]):
-        self._write_header("valid", fields)
-
-    def log_train_epoch(
-        self,
-        epoch: int,
-        metrics: Optional[Mapping[str, Any]] = None,
-        **fields: Any,
-    ):
-        record = {"epoch": epoch}
-        if metrics:
-            record.update(metrics)
-        record.update(fields)
-        self.log_train(**record)
-
-    def log_valid_epoch(
-        self,
-        epoch: int,
-        metrics: Optional[Mapping[str, Any]] = None,
-        **fields: Any,
-    ):
-        record = {"epoch": epoch}
-        if metrics:
-            record.update(metrics)
-        record.update(fields)
-        self.log_valid(**record)
-
-    def _write_info(self, channel: str, message: str, level: int = logging.INFO):
+    def _write_info(self, message: str, level: int = logging.INFO):
         if not self._is_main_process():
             return
-        self._write_prefixed_message(channel, "I", message, level=level)
+        self._write_prefixed_message("I", message, level=level)
+
+    def _write_info_blank_line(self, level: int = logging.INFO):
+        if not self._is_main_process():
+            return
+        self._log(self.log_name, level, "")
 
     def _write_prefixed_message(
         self,
-        channel: str,
         prefix: str,
         message: str,
         level: int = logging.INFO,
     ):
         if not self._is_main_process():
             return
-        self._log(channel, level, f"[{prefix}] {message}")
+        self._log(self.log_name, level, f"[{prefix}] {message}")
 
-    def _write_header(self, channel: str, fields: Sequence[str]):
+    def _write_header(self, fields: Sequence[str]):
         if not self._is_main_process():
             return
-        header = [str(field) for field in fields]
-        self._headers[channel] = header
-        self._log(channel, logging.INFO, "[H] " + " ".join(["log_index", *header]))
+        header = self._with_timestamp_column(fields)
+        self._header = header
+        self._log(self.log_name, logging.INFO, "[H] " + " ".join(["log_index", *header]))
 
-    def _write_log_values(self, channel: str, values: Sequence[Any]):
+    def _write_log_values(self, prefix: str, values: Sequence[Any]):
         if not self._is_main_process():
             return
-        log_index = self._log_counters.get(channel, 0)
+        line_prefix = self._validate_line_prefix(prefix)
+        log_index = self._log_counter
         formatted_values = [
             f"{self._format_value(value):>{self.log_value_width}}"
             for value in [log_index, *values]
         ]
-        self._log(channel, logging.INFO, "[L] " + " ".join(formatted_values))
-        self._log_counters[channel] = log_index + 1
+        self._log(self.log_name, logging.INFO, f"[{line_prefix}] " + " ".join(formatted_values))
+        self._log_counter = log_index + 1
 
     def _write_prefixed(
         self,
-        channel: str,
         prefix: str,
         fields: Mapping[str, Any],
         level: int = logging.INFO,
+        status: Optional[str] = None,
     ):
         if not self._is_main_process():
             return
-        self._log(channel, level, f"[{prefix}] {self._format_record(None, fields)}")
+        status_text = f"{status} | " if status else ""
+        self._log(
+            self.log_name,
+            level,
+            f"[{prefix}] {status_text}{self._format_record(None, fields)}",
+        )
 
     def _log_curve_row(
         self,
-        channel: str,
-        message: Optional[str],
+        prefix: str,
         fields: Mapping[str, Any],
     ):
         if not self._is_main_process():
             return
 
-        if message and not fields:
-            self._write_info(channel, message)
-            return
-
         record = dict(fields)
-        if message:
-            record = {"message": message, **record}
 
-        header = self._configured_headers.get(channel, list(record.keys()))
-        if self._headers.get(channel) != header:
-            self._write_header(channel, header)
+        header = self._with_timestamp_column(self._configured_header or list(record.keys()))
+        if self._header != header:
+            self._write_header(header)
 
+        record["timestamp"] = time.time_ns()
         self._write_log_values(
-            channel,
-            [record.get(key, "") for key in self._headers[channel]],
+            prefix,
+            [record.get(key, "") for key in self._header],
         )
+
+    @staticmethod
+    def _with_timestamp_column(fields: Sequence[str]) -> List[str]:
+        header = [str(field) for field in fields]
+        return header if "timestamp" in header else [*header, "timestamp"]
+
+    @staticmethod
+    def _validate_line_prefix(prefix: str) -> str:
+        text = str(prefix)
+        if len(text) != 1:
+            raise ValueError("log prefix must be exactly one character.")
+        if text in {"H", "I"}:
+            raise ValueError("log prefix cannot be 'H' or 'I'.")
+        return text
 
 
 if __name__ == "__main__":
