@@ -1,6 +1,69 @@
 import torch
 
 
+class AbsNormalize:
+    """
+    Absolute-value normalization for torch tensors.
+
+    Expected input shape: ``[B, C, ...]`` with ``ndim >= 3``. The first
+    dimension is always treated as batch, and the second dimension is always
+    treated as channel.
+
+    The transform divides the input by an absolute scale computed from the
+    input itself. ``run`` returns both the normalized tensor and the broadcastable
+    scale, so ``normalized * scale`` reconstructs the original values.
+
+    Example:
+        >>> x = torch.randn(2, 3, 64, 64)
+        >>> transform = AbsNormalize(per_channel=True)
+        >>> normalized = transform(x)
+        >>> normalized, scale = transform.run(x)
+        >>> restored = normalized * scale
+    """
+
+    def __init__(self, per_channel=True, eps=1e-12):
+        self.per_channel = per_channel
+        self.eps = eps
+
+    def _validate_input(self, x):
+        if not isinstance(x, torch.Tensor):
+            raise TypeError("x must be a torch.Tensor")
+        if x.ndim < 3:
+            raise ValueError("Input tensor must have shape [B, C, ...] with ndim >= 3")
+
+    def _batch_dim(self, x):
+        return 0
+
+    def _channel_dim(self, x):
+        return 1
+
+    def _reduce_dims(self, x):
+        batch_dim = self._batch_dim(x)
+
+        if not self.per_channel:
+            return tuple(dim for dim in range(x.ndim) if dim != batch_dim)
+
+        channel_dim = self._channel_dim(x)
+        return tuple(
+            dim for dim in range(x.ndim) if dim not in {batch_dim, channel_dim}
+        )
+
+    def get_scale(self, x):
+        self._validate_input(x)
+
+        reduce_dims = self._reduce_dims(x)
+        scale = x.abs().amax(dim=reduce_dims, keepdim=True)
+        return scale.clamp_min(self.eps)
+
+    def __call__(self, x):
+        normalized, _ = self.run(x)
+        return normalized
+
+    def run(self, x):
+        scale = self.get_scale(x)
+        return x / scale, scale
+
+
 class Normalize:
     """
     Callable transform that normalizes a tensor to [-1, 1].
