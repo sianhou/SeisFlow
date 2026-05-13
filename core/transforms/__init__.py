@@ -1,4 +1,4 @@
-from .clip import ClipFirstChannel
+from .clip import Clip, ClipFirstChannel
 from .normalize import (
     AbsNormalize,
     MinMaxToMinusOneOne,
@@ -9,6 +9,7 @@ from .slice import SliceLastDimension
 
 __all__ = [
     "AbsNormalize",
+    "Clip",
     "MinMaxToMinusOneOne",
     "PerChannelMinMaxToMinusOneOne",
     "ClipFirstChannel",

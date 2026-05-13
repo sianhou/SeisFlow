@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.dataset import SegyDataset, PatchDataset
 from core.patching import extract_overlapping_patches_2d
-from core.transforms import SliceLastDimension
+from core.transforms import Clip, SliceLastDimension
 from core.transforms import AbsNormalize
 
 
@@ -69,6 +69,18 @@ def normalize_patches_per_channel_abs(patches):
     return normalized.squeeze(1).cpu().numpy()
 
 
+def clip_patches(patches, vmin=None, vmax=None):
+    if patches.ndim != 3:
+        raise ValueError(f"Expected patches to be [N,H,W], got {patches.shape}")
+    if vmin is None and vmax is None:
+        return patches
+
+    patches_tensor = torch.from_numpy(patches).float().unsqueeze(1)  # [N,1,H,W]
+    clipper = Clip(vmin=vmin, vmax=vmax, per_channel=True)
+    clipped = clipper(patches_tensor)
+    return clipped.squeeze(1).cpu().numpy()
+
+
 def create_parser():
     parser = argparse.ArgumentParser(
         description=(
@@ -86,14 +98,20 @@ def create_parser():
     )
     parser.add_argument("--overlap_size", default=16, type=int)
     parser.add_argument("--output_dir", default="./dataset_train")
+    parser.add_argument("--clip_vmin", default=None, type=float,
+                        help="Optional lower clipping bound applied before normalization.")
+    parser.add_argument("--clip_vmax", default=None, type=float,
+                        help="Optional upper clipping bound applied before normalization.")
     parser.add_argument("--normalize", action="store_true",
                         help="Normalize each saved patch independently with per_channel+abs to [-1, 1].")
     parser.add_argument("--slice", nargs=2, type=int, default=[0, 0],
                         help="Slice range on the last dimension as two ints: start end. Use 0 0 to disable.")
     parser.add_argument("--resize", nargs=2, type=int, default=[0, 0],
                         help="Resize target as two ints: height width. Use 0 0 to disable.")
-    parser.add_argument("--test_index", default=0, type=int,
-                        help="Patch index used for visualization in test_data.")
+    parser.add_argument("--plot_start", default=0, type=int,
+                        help="First patch index used for visualization in test_data.")
+    parser.add_argument("--plot_interval", default=100, type=int,
+                        help="Plot every N patches from --plot_start in test_data.")
     return parser
 
 
@@ -106,6 +124,12 @@ def validate_args(args):
         raise ValueError("--slice values must be non-negative. Use 0 0 to disable.")
     if args.resize[0] < 0 or args.resize[1] < 0:
         raise ValueError("--resize values must be non-negative. Use 0 0 to disable.")
+    if args.clip_vmin is not None and args.clip_vmax is not None and args.clip_vmin > args.clip_vmax:
+        raise ValueError("--clip_vmin must be less than or equal to --clip_vmax.")
+    if args.plot_start < 0:
+        raise ValueError("--plot_start must be non-negative.")
+    if args.plot_interval <= 0:
+        raise ValueError("--plot_interval must be positive.")
 
 
 def build_dataset(args):
@@ -135,6 +159,9 @@ def build_dataset(args):
             stats.skipped_files += 1
             print(f"Skipped shot {i:04d}: all patches are zero")
             continue
+
+        if args.clip_vmin is not None or args.clip_vmax is not None:
+            patches = clip_patches(patches, vmin=args.clip_vmin, vmax=args.clip_vmax)
 
         if args.normalize:
             patches = normalize_patches_per_channel_abs(patches)
@@ -170,30 +197,48 @@ def build_dataset(args):
     print(f"skipped_zero_patches: {stats.skipped_zero_patches}")
     print(f"slice_range: {args.slice}")
     print(f"resize: {args.resize}")
+    print(f"clip_vmin: {args.clip_vmin}")
+    print(f"clip_vmax: {args.clip_vmax}")
     print(f"normalize: {args.normalize}")
 
 
 def test_data(args):
     print("Creating patch dataset")
     pd = PatchDataset(data_path=args.output_dir)
-    print(f"total patches: {len(pd)}")
+    total_patches = len(pd)
+    print(f"total patches: {total_patches}")
 
-    test_index = max(0, min(args.test_index, len(pd) - 1))
-    patch = pd[test_index]
-    patch_np = patch.squeeze(0).detach().cpu().numpy()
+    if total_patches == 0:
+        print("No patches available for visualization")
+        return
 
-    print(f"Visualizing patch index: {test_index}")
-    print(
-        f"patch stats: min={patch_np.min():.6f}, "
-        f"max={patch_np.max():.6f}, mean={patch_np.mean():.6f}"
-    )
+    plot_start = min(args.plot_start, total_patches - 1)
+    plot_indices = range(plot_start, total_patches, args.plot_interval)
+    figures_dir = os.path.join(args.output_dir, "figures")
+    os.makedirs(figures_dir, exist_ok=True)
 
-    plt.figure(figsize=(6, 6))
-    plt.imshow(patch_np.T, cmap="seismic", origin="upper")
-    plt.title(f"Patch #{test_index}")
-    plt.colorbar()
-    plt.tight_layout()
-    plt.show()
+    for patch_index in plot_indices:
+        patch = pd[patch_index]
+        patch_np = patch.squeeze(0).detach().cpu().numpy()
+
+        print(f"Visualizing patch index: {patch_index}")
+        print(
+            f"patch stats: min={patch_np.min():.6f}, "
+            f"max={patch_np.max():.6f}, mean={patch_np.mean():.6f}"
+        )
+
+        plt.figure(figsize=(6, 6))
+        if args.normalize:
+            plt.imshow(patch_np.T, cmap="seismic", origin="upper", vmin=-1, vmax=1)
+        else:
+            plt.imshow(patch_np.T, cmap="seismic", origin="upper")
+        plt.title(f"Patch #{patch_index}")
+        plt.colorbar()
+        plt.tight_layout()
+        figure_file = os.path.join(figures_dir, f"patch_{patch_index:06d}.png")
+        plt.savefig(figure_file, dpi=150)
+        plt.close()
+        print(f"Saved figure: {figure_file}")
 
 
 if __name__ == '__main__':
