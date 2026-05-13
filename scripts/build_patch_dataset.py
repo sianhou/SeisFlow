@@ -1,14 +1,22 @@
 import argparse
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from torchvision import transforms
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.dataset import SegyDataset, PatchDataset
 from core.patching import extract_overlapping_patches_2d
-from core.transforms import SliceLastDimension, ClipFirstChannel
+from core.transforms import SliceLastDimension
+from core.transforms import AbsNormalize
 
 
 @dataclass
@@ -34,9 +42,6 @@ def build_sample_transform(args):
             transforms.Resize((args.resize[0], args.resize[1]))
         )
 
-    transform_list.append(ClipFirstChannel(-2, 2))
-    # transform_list.append(ScaleFirstChannel(0.5))
-
     if not transform_list:
         return None
 
@@ -54,30 +59,36 @@ def filter_zero_patches(patches, positions):
     return filtered_patches, filtered_positions, skipped
 
 
-def Normalize(patches, scale_range=(-1, 1), eps=1e-12):
+def normalize_patches_per_channel_abs(patches):
     if patches.ndim != 3:
         raise ValueError(f"Expected patches to be [N,H,W], got {patches.shape}")
 
-    low, high = scale_range
-    if low >= high:
-        raise ValueError("scale_range must satisfy min < max")
-
-    patch_min = patches.min(axis=(1, 2), keepdims=True)
-    patch_max = patches.max(axis=(1, 2), keepdims=True)
-    normalized = 2.0 * (patches - patch_min) / (patch_max - patch_min + eps) - 1.0
-    return (normalized + 1.0) * 0.5 * (high - low) + low
+    patches_tensor = torch.from_numpy(patches).float().unsqueeze(1)  # [N,1,H,W]
+    normalizer = AbsNormalize(per_channel=True)
+    normalized = normalizer(patches_tensor)
+    return normalized.squeeze(1).cpu().numpy()
 
 
 def create_parser():
-    parser = argparse.ArgumentParser(description="Build patch dataset from SEG-Y shots")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build single-channel seismic patch datasets for WP1. Supports slicing, "
+            "resizing, and custom square patch sizes such as 128, 256, and 512."
+        )
+    )
     parser.add_argument("--segy",
                         help="Input SEG-Y file used to build the patch dataset.")
-    parser.add_argument("--patch_size", default=32, type=int)
+    parser.add_argument(
+        "--patch_size",
+        default=256,
+        type=int,
+        help="Square patch size. WP1 commonly uses 128, 256, or 512.",
+    )
     parser.add_argument("--overlap_size", default=16, type=int)
     parser.add_argument("--output_dir", default="./dataset_train")
     parser.add_argument("--normalize", action="store_true",
-                        help="Normalize each saved patch independently to [-1, 1].")
-    parser.add_argument("--slice", nargs=2, type=int, default=[0, 1501],
+                        help="Normalize each saved patch independently with per_channel+abs to [-1, 1].")
+    parser.add_argument("--slice", nargs=2, type=int, default=[0, 0],
                         help="Slice range on the last dimension as two ints: start end. Use 0 0 to disable.")
     parser.add_argument("--resize", nargs=2, type=int, default=[0, 0],
                         help="Resize target as two ints: height width. Use 0 0 to disable.")
@@ -86,7 +97,19 @@ def create_parser():
     return parser
 
 
+def validate_args(args):
+    if args.patch_size <= 0:
+        raise ValueError("--patch_size must be positive.")
+    if args.overlap_size < 0 or args.overlap_size >= args.patch_size:
+        raise ValueError("--overlap_size must be in [0, patch_size).")
+    if args.slice[0] < 0 or args.slice[1] < 0:
+        raise ValueError("--slice values must be non-negative. Use 0 0 to disable.")
+    if args.resize[0] < 0 or args.resize[1] < 0:
+        raise ValueError("--resize values must be non-negative. Use 0 0 to disable.")
+
+
 def build_dataset(args):
+    validate_args(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
     sample_transform = build_sample_transform(args)
@@ -114,7 +137,7 @@ def build_dataset(args):
             continue
 
         if args.normalize:
-            patches = Normalize(patches)
+            patches = normalize_patches_per_channel_abs(patches)
 
         output_file = os.path.join(args.output_dir, f"patches_{i:04d}.npz")
         positions_array = np.array(positions)
@@ -157,7 +180,7 @@ def test_data(args):
 
     test_index = max(0, min(args.test_index, len(pd) - 1))
     patch = pd[test_index]
-    patch_np = patch.squeeze(0).detach().clam.cpu().numpy()
+    patch_np = patch.squeeze(0).detach().cpu().numpy()
 
     print(f"Visualizing patch index: {test_index}")
     print(
