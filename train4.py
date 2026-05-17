@@ -9,13 +9,11 @@ import torch
 import torch.nn.functional as F
 from torchmetrics import MeanMetric
 from torchmetrics.image import StructuralSimilarityIndexMeasure
-from torchvision import transforms
 
 from core.dataset import PatchDataset
-from core.logging.logger import SimpleLogger
+from core.logging.logger import SimpleLogger2
 from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
-from core.transforms import PerChannelMinMaxToMinusOneOne
 from flow_matching.path import CondOTProbPath
 from models.dit import DiT
 from models.unet import UNetModel
@@ -63,35 +61,41 @@ MODEL_BUILDERS = {
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Train DiT on seismic patches")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train a conditional flow-matching model for seismic patch reconstruction with random row masking."
+        )
+    )
+    parser.add_argument(
+        "--train_data_dir",
+        default="./train_dataset",
+        help=(
+            "Directory containing training patch NPY files. If using a VAE, "
+            "patch values should be normalized to [-1, 1]."
+        ),
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="./output_dir",
+        help="Directory used for logs and checkpoints.",
+    )
+    parser.add_argument(
+        "--model_arch",
+        choices=sorted(MODEL_CONFIGS.keys()),
+        default="dit",
+        help="Model architecture to train.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        default=32,
+        type=int,
+        help="Mini-batch size per process.",
+    )
     parser.add_argument(
         "--grad_accum_steps",
         default=1,
         type=int,
-        help="Number of gradient accumulation steps.",
-    )
-    parser.add_argument(
-        "--batch_size",
-        default=16,
-        type=int,
-        help="Mini-batch size per GPU.",
-    )
-    parser.add_argument(
-        "--data_dir",
-        default="./train_dataset",
-        help="Training dataset directory.",
-    )
-    parser.add_argument(
-        "--use_lr_decay",
-        action="store_true",
-        help="Apply linear learning-rate decay over training.",
-    )
-    parser.add_argument("--device", default="cuda", help="Training device.")
-    parser.add_argument("--dist_on_itp", action="store_true")
-    parser.add_argument(
-        "--dist_url",
-        default="env://",
-        help="URL used to initialize distributed training.",
+        help="Number of mini-batches to accumulate before each optimizer step.",
     )
     parser.add_argument(
         "--num_epochs",
@@ -101,73 +105,101 @@ def build_parser():
     )
     parser.add_argument(
         "--learning_rate",
-        type=float,
         default=1e-4,
-        help="Optimizer learning rate.",
+        type=float,
+        help="AdamW learning rate.",
     )
     parser.add_argument(
-        "--mask_ratio_range",
+        "--lr_schedule",
+        choices=["constant", "linear"],
+        default="constant",
+        help="Learning-rate schedule to use during training.",
+    )
+    parser.add_argument(
+        "--missing_ratio_range",
         nargs=2,
         type=float,
         default=[0.3, 0.7],
-        help="Range of random row-mask ratios.",
-    )
-    parser.add_argument("--num_workers", default=10, type=int)
-    parser.add_argument(
-        "--checkpoint_interval",
-        default=50,
-        type=int,
-        help="Save a checkpoint every N epochs.",
-    )
-    parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument(
-        "--adam_betas",
-        nargs=2,
-        type=float,
-        default=[0.9, 0.95],
-        help="Beta coefficients for AdamW.",
-    )
-    parser.add_argument(
-        "--use_ssim_loss",
-        action="store_true",
-        help="Add image-domain SSIM loss computed from predicted images.",
+        metavar=("MIN", "MAX"),
+        help="Range of random missing ratios sampled per batch.",
     )
     parser.add_argument(
         "--ssim_loss_weight",
-        default=0.1,
+        default=0.0,
         type=float,
-        help="Weight for the SSIM loss term.",
+        help="Weight for optional SSIM reconstruction loss. Set 0 to disable.",
     )
     parser.add_argument(
-        "--output_dir",
-        default="./output_dir",
-        help="Directory used for logs and checkpoints.",
+        "--num_workers",
+        default=4,
+        type=int,
+        help="Number of DataLoader worker processes per training process.",
     )
     parser.add_argument(
         "--pin_memory",
         action="store_true",
-        help="Enable pinned memory in the dataloader.",
+        help="Enable pinned host memory in the DataLoader.",
     )
     parser.add_argument(
-        "--model_name",
-        choices=sorted(MODEL_CONFIGS.keys()),
-        default="dit",
-        help="Model architecture to train.",
+        "--save_every_epochs",
+        default=50,
+        type=int,
+        help="Save a checkpoint every N epochs.",
+    )
+    parser.add_argument(
+        "--log_id",
+        default=None,
+        help="Optional run directory name under output_dir.",
+    )
+    parser.add_argument(
+        "--log_console",
+        action="store_true",
+        help="Also print SimpleLogger2 output to stdout.",
+    )
+    parser.add_argument(
+        "--seed",
+        default=0,
+        type=int,
+        help="Base random seed. Distributed ranks add their rank to this value.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="Training device, such as cuda, cuda:0, cpu, or mps.",
+    )
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="First beta coefficient for AdamW.",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.95,
+        help="Second beta coefficient for AdamW.",
+    )
+    parser.add_argument(
+        "--dist_on_itp",
+        action="store_true",
+        help="Initialize distributed training from ITP/OpenMPI environment variables.",
+    )
+    parser.add_argument(
+        "--dist_url",
+        default="env://",
+        help="URL used to initialize distributed training.",
     )
     parser.add_argument(
         "--world_size",
         default=1,
         type=int,
-        help="Number of distributed processes.",
+        help="Number of distributed processes, usually provided by torchrun.",
     )
     return parser
 
 
 def build_dataloader(args):
-    dataset = PatchDataset(
-        args.data_dir,
-        transform=transforms.Compose([PerChannelMinMaxToMinusOneOne()]),
-    )
+    dataset = PatchDataset(args.train_data_dir)
 
     sampler = torch.utils.data.DistributedSampler(
         dataset,
@@ -175,6 +207,7 @@ def build_dataloader(args):
         rank=distributed_mode.get_rank(),
         shuffle=True,
     )
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,
@@ -183,6 +216,7 @@ def build_dataloader(args):
         pin_memory=args.pin_memory,
         drop_last=True,
     )
+
     return dataset, sampler, dataloader
 
 
@@ -220,8 +254,12 @@ def train_one_epoch(
             running_velocity_loss.reset()
             running_ssim_loss.reset()
 
-        clean_images = batch[:, 0].unsqueeze(1).to(device, non_blocking=True)
-        mask_ratio = np.random.uniform(*args.mask_ratio_range)
+        clean_images = batch.to(device, non_blocking=True)
+        if clean_images.shape[1] != 1:
+            raise ValueError(
+                f"train4.py expects single-channel patches, got shape {tuple(clean_images.shape)}."
+            )
+        mask_ratio = np.random.uniform(*args.missing_ratio_range)
         observed_mask = generate_random_row_mask(x=clean_images, missing_ratio=mask_ratio)
         masked_images = observed_mask * clean_images
         conditioning = torch.cat((masked_images, observed_mask), dim=1)
@@ -242,7 +280,7 @@ def train_one_epoch(
 
             total_loss = velocity_loss
             ssim_loss = torch.zeros((), device=device)
-            if args.use_ssim_loss:
+            if args.ssim_loss_weight > 0:
                 timesteps_reshaped = timesteps.view(-1, 1, 1, 1)
                 predicted_images = noisy_images + (1.0 - timesteps_reshaped) * predicted_velocity
                 ssim_score = ssim_metric(predicted_images, clean_images)
@@ -251,12 +289,13 @@ def train_one_epoch(
 
         running_total_loss.update(total_loss.detach())
         running_velocity_loss.update(velocity_loss.detach())
-        if args.use_ssim_loss:
+        if args.ssim_loss_weight > 0:
             running_ssim_loss.update(ssim_loss.detach())
         epoch_total_loss.update(total_loss.detach())
 
         loss = total_loss / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
+        step_start_time = time.time()
         scaler(
             loss,
             optimizer,
@@ -265,60 +304,171 @@ def train_one_epoch(
         )
 
         learning_rate = optimizer.param_groups[0]["lr"]
-        if args.use_ssim_loss:
-            logger.info(
-                f"Epoch {epoch + 1} [{step + 1}/{total_steps}] "
-                f"total_loss={running_total_loss.compute():.6f}, "
-                f"velocity_loss={running_velocity_loss.compute():.6f}, "
-                f"ssim_loss={running_ssim_loss.compute():.6f}, "
-                f"lr={learning_rate:.2e}"
-            )
-        else:
-            logger.info(
-                f"Epoch {epoch + 1} [{step + 1}/{total_steps}] "
-                f"loss={running_total_loss.compute():.6f}, lr={learning_rate:.2e}"
-            )
+        if logger is not None:
+            train_fields = {
+                "epoch": epoch + 1,
+                "step": step + 1,
+                "total_steps": total_steps,
+                "batch_size": int(clean_images.shape[0]),
+                "loss": float(total_loss.detach().cpu()),
+                "running_loss": float(running_total_loss.compute().detach().cpu()),
+                "velocity_loss": float(velocity_loss.detach().cpu()),
+                "running_velocity_loss": float(
+                    running_velocity_loss.compute().detach().cpu()
+                ),
+                "lr": learning_rate,
+                "mask_ratio": float(mask_ratio),
+                "optimizer_step": int(should_step),
+                "step_time_sec": time.time() - step_start_time,
+            }
+            if args.ssim_loss_weight > 0:
+                train_fields.update(
+                    {
+                        "ssim_loss": float(ssim_loss.detach().cpu()),
+                        "running_ssim_loss": float(
+                            running_ssim_loss.compute().detach().cpu()
+                        ),
+                        "ssim_loss_weight": args.ssim_loss_weight,
+                    }
+                )
+            logger.log_train(**train_fields)
 
     return epoch_total_loss.compute().item()
 
 
-def save_checkpoint(model, output_dir, epoch):
-    checkpoint_path = Path(output_dir) / f"model_epoch_{epoch + 1:05d}.pth"
-    torch.save(model.state_dict(), checkpoint_path)
+def log_event(logger, event, **fields):
+    if logger is not None:
+        logger.log_event(event, **fields)
+
+
+def log_global_params(
+        logger,
+        args,
+        dataset,
+        dataloader,
+        model,
+        total_params,
+        trainable_params,
+        frozen_params,
+        effective_batch_size,
+):
+    if logger is None:
+        return
+    logger.log_system_info(
+        package_names=[
+            "torch",
+            "torchvision",
+            "torchmetrics",
+            "numpy",
+            "flow_matching",
+        ]
+    )
+    logger.log_global_params(
+        {
+            "task": "conditional_flow_matching_seismic_patch_reconstruction",
+            "train_data_dir": args.train_data_dir,
+            "dataset_size": len(dataset),
+            "num_batches_per_epoch": len(dataloader),
+            "model_arch": args.model_arch,
+            "model_config": MODEL_CONFIGS[args.model_arch],
+            "total_params": total_params,
+            "trainable_params": trainable_params,
+            "frozen_params": frozen_params,
+            "batch_size": args.batch_size,
+            "grad_accum_steps": args.grad_accum_steps,
+            "effective_batch_size": effective_batch_size,
+            "optimizer": "AdamW",
+            "learning_rate": args.learning_rate,
+            "adam_beta1": args.adam_beta1,
+            "adam_beta2": args.adam_beta2,
+            "lr_schedule": args.lr_schedule,
+            "missing_ratio_range": args.missing_ratio_range,
+            "ssim_loss_weight": args.ssim_loss_weight,
+            "amp": True,
+            "model": str(model),
+        }
+    )
+
+
+def save_training_checkpoint(
+        model,
+        optimizer,
+        lr_scheduler,
+        scaler,
+        args,
+        epoch,
+        output_dir,
+):
+    checkpoint_path = Path(output_dir) / f"checkpoint_epoch_{epoch + 1:05d}.pth"
+    amp_scaler_state = None
+    if hasattr(scaler, "_scaler"):
+        amp_scaler_state = scaler._scaler.state_dict()
+    checkpoint = {
+        "epoch": epoch + 1,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "lr_scheduler": lr_scheduler.state_dict(),
+        "amp_scaler": amp_scaler_state,
+        "model_arch": args.model_arch,
+        "model_config": MODEL_CONFIGS[args.model_arch],
+        "args": vars(args),
+    }
+    torch.save(checkpoint, checkpoint_path)
     return checkpoint_path
 
 
 def main(args):
     distributed_mode.init_distributed_mode(args)
 
-    logger = SimpleLogger(log_dir=args.output_dir, overwrite=True)
-    logger.info(f"job dir: {os.path.dirname(os.path.realpath(__file__))}")
-    logger.info("{}".format(args).replace(", ", ",\n"))
+    is_main_process = distributed_mode.is_main_process()
+    logger = None
+    if is_main_process:
+        logger = SimpleLogger2(
+            output_dir=args.output_dir,
+            log_id=args.log_id,
+            overwrite=True,
+            console=args.log_console,
+        )
+        logger.log_event(
+            "script_started",
+            job_dir=os.path.dirname(os.path.realpath(__file__)),
+        )
+        logger.log_argparse_params(args)
 
     device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()
     set_random_seed(seed)
 
-    logger.info(f"Initializing dataset: {args.data_dir}")
-    _, train_sampler, train_loader = build_dataloader(args)
-    logger.info(str(train_sampler))
+    log_event(logger, "dataset_initializing", train_data_dir=args.train_data_dir)
+    dataset, train_sampler, train_loader = build_dataloader(args)
+    log_event(
+        logger,
+        "dataset_initialized",
+        dataset_size=len(dataset),
+        num_batches=len(train_loader),
+        sampler=str(train_sampler),
+    )
 
-    logger.info(f"Initializing model: {args.model_name}")
-    model = build_model(args.model_name, device)
+    log_event(logger, "model_initializing", model_arch=args.model_arch)
+    model = build_model(args.model_arch, device)
     model_without_ddp = model
 
     total_params, trainable_params, frozen_params = count_model_parameters(model_without_ddp)
-    logger.info(str(model_without_ddp))
-    logger.info(f"Total params:     {total_params:,}")
-    logger.info(f"Trainable params: {trainable_params:,}")
-    logger.info(f"Frozen params:    {frozen_params:,}")
 
     effective_batch_size = (
             args.batch_size * args.grad_accum_steps * distributed_mode.get_world_size()
     )
-    logger.info(f"Learning rate: {args.learning_rate:.2e}")
-    logger.info(f"Gradient accumulation steps: {args.grad_accum_steps}")
-    logger.info(f"Effective batch size: {effective_batch_size}")
+    log_global_params(
+        logger,
+        args=args,
+        dataset=dataset,
+        dataloader=train_loader,
+        model=model_without_ddp,
+        total_params=total_params,
+        trainable_params=trainable_params,
+        frozen_params=frozen_params,
+        effective_batch_size=effective_batch_size,
+    )
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -328,14 +478,14 @@ def main(args):
         )
         model_without_ddp = model.module
 
-    logger.info("Initializing optimizer")
+    log_event(logger, "optimizer_initializing")
     optimizer = torch.optim.AdamW(
         model_without_ddp.parameters(),
         lr=args.learning_rate,
-        betas=tuple(args.adam_betas),
+        betas=(args.adam_beta1, args.adam_beta2),
     )
 
-    if args.use_lr_decay:
+    if args.lr_schedule == "linear":
         lr_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer,
             total_iters=args.num_epochs,
@@ -349,17 +499,22 @@ def main(args):
             factor=1.0,
         )
 
-    logger.info(f"Optimizer: {optimizer}")
-    logger.info(f"LR scheduler: {lr_scheduler}")
+    log_event(
+        logger,
+        "optimizer_initialized",
+        optimizer=str(optimizer),
+        lr_scheduler=str(lr_scheduler),
+    )
 
     scaler = AMPGradScaler()
     flow_path = CondOTProbPath()
     ssim_metric = None
-    if args.use_ssim_loss:
+    if args.ssim_loss_weight > 0:
         ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
 
-    logger.info("Start training")
+    log_event(logger, "training_started")
     start_time = time.time()
+    checkpoint_dir = logger.run_dir if logger is not None else Path(args.output_dir)
 
     for epoch in range(args.num_epochs):
         if args.distributed:
@@ -378,17 +533,42 @@ def main(args):
             epoch=epoch,
         )
         lr_scheduler.step()
-        logger.info(f"Epoch {epoch + 1} finished with mean loss {epoch_loss:.6f}")
+        log_event(
+            logger,
+            "epoch_finished",
+            epoch=epoch + 1,
+            mean_loss=epoch_loss,
+        )
 
         if (
-                (epoch + 1) % args.checkpoint_interval == 0
+                (epoch + 1) % args.save_every_epochs == 0
                 and distributed_mode.get_rank() == 0
         ):
-            checkpoint_path = save_checkpoint(model_without_ddp, args.output_dir, epoch)
-            logger.info(f"Saved checkpoint: {checkpoint_path}")
+            checkpoint_path = save_training_checkpoint(
+                model=model_without_ddp,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                scaler=scaler,
+                args=args,
+                epoch=epoch,
+                output_dir=checkpoint_dir,
+            )
+            log_event(
+                logger,
+                "checkpoint_saved",
+                epoch=epoch + 1,
+                path=str(checkpoint_path),
+            )
 
     total_time = time.time() - start_time
-    logger.info(f"Training finished in {total_time:.2f}s")
+    log_event(
+        logger,
+        "training_finished",
+        total_time_sec=total_time,
+        run_dir=str(checkpoint_dir),
+    )
+    if logger is not None:
+        logger.close()
 
     if args.distributed:
         distributed_mode.barrier()
