@@ -6,8 +6,6 @@ from pathlib import Path
 
 import numpy as np
 
-from core.patching import NumpyPatchProcessor
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -148,7 +146,7 @@ def validate_args(args):
 
 def build_dataset(args):
     from core.dataset import SegyDataset
-    from core.patching import extract_overlapping_patches_2d
+    from core.patching import NumpyPatchProcessor
 
     validate_args(args)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -158,11 +156,12 @@ def build_dataset(args):
 
     patch_size = (args.patch_size, args.patch_size)
     overlap_size = (args.overlap_size, args.overlap_size)
+    patch_processor = NumpyPatchProcessor()
     stats = BuildStats(total_shots=len(dataset))
 
     for i in range(len(dataset)):
         shot = dataset[i][0].numpy()
-        patches, positions, original_shape = NumpyPatchProcessor.extract_overlapping_patches_2d(
+        patches, positions, original_shape = patch_processor.extract_overlapping_patches_2d(
             shot,
             patch_size=patch_size,
             overlap=overlap_size,

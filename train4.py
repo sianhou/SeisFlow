@@ -400,15 +400,12 @@ def save_training_checkpoint(
         output_dir,
 ):
     checkpoint_path = Path(output_dir) / f"checkpoint_epoch_{epoch + 1:05d}.pth"
-    amp_scaler_state = None
-    if hasattr(scaler, "_scaler"):
-        amp_scaler_state = scaler._scaler.state_dict()
     checkpoint = {
         "epoch": epoch + 1,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "lr_scheduler": lr_scheduler.state_dict(),
-        "amp_scaler": amp_scaler_state,
+        "amp_scaler": scaler.state_dict(),
         "model_arch": args.model_arch,
         "model_config": MODEL_CONFIGS[args.model_arch],
         "args": vars(args),
@@ -506,7 +503,7 @@ def main(args):
         lr_scheduler=str(lr_scheduler),
     )
 
-    scaler = AMPGradScaler()
+    scaler = AMPGradScaler(enabled=device.type == "cuda", device=device.type)
     flow_path = CondOTProbPath()
     ssim_metric = None
     if args.ssim_loss_weight > 0:

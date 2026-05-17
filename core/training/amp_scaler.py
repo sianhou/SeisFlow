@@ -25,8 +25,12 @@ def compute_grad_norm(parameters, norm_type: float = 2.0) -> Tensor:
 class AMPGradScaler:
     state_dict_key = "amp_scaler"
 
-    def __init__(self):
-        self._scaler = torch.amp.GradScaler(device="cuda")
+    def __init__(self, enabled=True, device="cuda"):
+        self.enabled = bool(enabled)
+        self.device = device
+        self._scaler = None
+        if self.enabled:
+            self._scaler = torch.amp.GradScaler(device=device)
 
     def __call__(
             self,
@@ -37,19 +41,36 @@ class AMPGradScaler:
             create_graph=False,
             update_grad=True,
     ):
-        self._scaler.scale(loss).backward(create_graph=create_graph)
+        if self.enabled:
+            self._scaler.scale(loss).backward(create_graph=create_graph)
+        else:
+            loss.backward(create_graph=create_graph)
         if update_grad:
             if clip_grad is not None:
                 assert parameters is not None
-                self._scaler.unscale_(
-                    optimizer
-                )  # unscale the gradients of optimizer's assigned params in-place
+                if self.enabled:
+                    self._scaler.unscale_(
+                        optimizer
+                    )  # unscale the gradients of optimizer's assigned params in-place
                 norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad)
             else:
-                self._scaler.unscale_(optimizer)
+                if self.enabled:
+                    self._scaler.unscale_(optimizer)
                 norm = compute_grad_norm(parameters)
-            self._scaler.step(optimizer)
-            self._scaler.update()
+            if self.enabled:
+                self._scaler.step(optimizer)
+                self._scaler.update()
+            else:
+                optimizer.step()
         else:
             norm = None
         return norm
+
+    def state_dict(self):
+        if not self.enabled:
+            return {}
+        return self._scaler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        if self.enabled and state_dict:
+            self._scaler.load_state_dict(state_dict)
