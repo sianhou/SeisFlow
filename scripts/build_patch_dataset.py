@@ -4,19 +4,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-import torch
-from torchvision import transforms
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.dataset import SegyDataset, PatchDataset
-from core.patching import extract_overlapping_patches_2d
-from core.transforms import Clip, SliceLastDimension
-from core.transforms import AbsNormalize
 
 
 @dataclass
@@ -30,6 +22,10 @@ class BuildStats:
 
 
 def build_sample_transform(args):
+    from torchvision import transforms
+
+    from core.transforms import SliceLastDimension
+
     transform_list = []
 
     if 0 <= args.slice[0] < args.slice[1]:
@@ -60,6 +56,10 @@ def filter_zero_patches(patches, positions):
 
 
 def normalize_patches_per_channel_abs(patches):
+    import torch
+
+    from core.transforms import AbsNormalize
+
     if patches.ndim != 3:
         raise ValueError(f"Expected patches to be [N,H,W], got {patches.shape}")
 
@@ -70,6 +70,10 @@ def normalize_patches_per_channel_abs(patches):
 
 
 def clip_patches(patches, vmin=None, vmax=None):
+    import torch
+
+    from core.transforms import Clip
+
     if patches.ndim != 3:
         raise ValueError(f"Expected patches to be [N,H,W], got {patches.shape}")
     if vmin is None and vmax is None:
@@ -86,7 +90,15 @@ def create_parser():
         description=(
             "Build single-channel seismic patch datasets for WP1. Supports slicing, "
             "resizing, and custom square patch sizes such as 128, 256, and 512."
-        )
+        ),
+        epilog=(
+            "Examples:\n"
+            "  Build 256x256 patches:\n"
+            "    python scripts/build_patch_dataset.py --segy ma2+GathAP.sgy "
+            "--patch_size 256 --overlap_size 16 --slice 0 1501 "
+            "--resize 512 512 --normalize --output_dir ./train_dataset256"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--segy",
                         help="Input SEG-Y file used to build the patch dataset.")
@@ -133,6 +145,9 @@ def validate_args(args):
 
 
 def build_dataset(args):
+    from core.dataset import SegyDataset
+    from core.patching import extract_overlapping_patches_2d
+
     validate_args(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -166,17 +181,8 @@ def build_dataset(args):
         if args.normalize:
             patches = normalize_patches_per_channel_abs(patches)
 
-        output_file = os.path.join(args.output_dir, f"patches_{i:04d}.npz")
-        positions_array = np.array(positions)
-
-        np.savez_compressed(
-            output_file,
-            patches=patches,
-            positions=positions_array,
-            original_shape=original_shape,
-            patch_size=patch_size,
-            overlap_size=overlap_size
-        )
+        output_file = os.path.join(args.output_dir, f"patches_{i:04d}.npy")
+        np.save(output_file, patches)
 
         stats.saved_files += 1
         stats.total_patches_saved += len(patches)
@@ -203,6 +209,10 @@ def build_dataset(args):
 
 
 def test_data(args):
+    import matplotlib.pyplot as plt
+
+    from core.dataset import PatchDataset
+
     print("Creating patch dataset")
     pd = PatchDataset(data_path=args.output_dir)
     total_patches = len(pd)
