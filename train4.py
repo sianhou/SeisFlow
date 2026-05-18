@@ -1,13 +1,14 @@
 import argparse
 import gc
 import os
+import socket
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torchmetrics import MeanMetric
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from core.dataset import PatchDataset
@@ -58,6 +59,43 @@ MODEL_BUILDERS = {
     "dit": DiT,
     "unet": UNetModel,
 }
+
+
+class NodeLocalLogger(SimpleLogger2):
+    def __init__(self, *args, local_rank=0, **kwargs):
+        self.local_rank = local_rank
+        super().__init__(*args, **kwargs)
+
+    def _is_main_process(self):
+        return self.local_rank == 0
+
+
+def resolve_distributed_log_id(args):
+    if args.log_id is not None:
+        return args.log_id
+    if not getattr(args, "distributed", False):
+        return None
+
+    log_id = None
+    if distributed_mode.is_main_process():
+        log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_id_holder = [log_id]
+    torch.distributed.broadcast_object_list(log_id_holder, src=0)
+    args.log_id = log_id_holder[0]
+    return args.log_id
+
+
+def collect_node_info(args):
+    return {
+        "hostname": socket.gethostname(),
+        "rank": getattr(args, "rank", 0),
+        "world_size": getattr(args, "world_size", 1),
+        "local_rank": getattr(args, "gpu", 0),
+        "local_world_size": os.environ.get("LOCAL_WORLD_SIZE", ""),
+        "node_rank": os.environ.get("GROUP_RANK", ""),
+        "master_addr": os.environ.get("MASTER_ADDR", ""),
+        "master_port": os.environ.get("MASTER_PORT", ""),
+    }
 
 
 def build_parser():
@@ -241,18 +279,21 @@ def train_one_epoch(
     gc.collect()
     model.train(True)
 
-    running_total_loss = MeanMetric().to(device, non_blocking=True)
-    running_velocity_loss = MeanMetric().to(device, non_blocking=True)
-    running_ssim_loss = MeanMetric().to(device, non_blocking=True)
-    epoch_total_loss = MeanMetric().to(device, non_blocking=True)
+    running_total_loss = 0.0
+    running_velocity_loss = 0.0
+    running_ssim_loss = 0.0
+    running_steps = 0
+    epoch_total_loss = 0.0
+    epoch_steps = 0
     total_steps = len(dataloader)
 
     for step, batch in enumerate(dataloader):
         if step % args.grad_accum_steps == 0:
             optimizer.zero_grad()
-            running_total_loss.reset()
-            running_velocity_loss.reset()
-            running_ssim_loss.reset()
+            running_total_loss = 0.0
+            running_velocity_loss = 0.0
+            running_ssim_loss = 0.0
+            running_steps = 0
 
         clean_images = batch.to(device, non_blocking=True)
         if clean_images.shape[1] != 1:
@@ -287,11 +328,15 @@ def train_one_epoch(
                 ssim_loss = 1.0 - ssim_score
                 total_loss = total_loss + args.ssim_loss_weight * ssim_loss
 
-        running_total_loss.update(total_loss.detach())
-        running_velocity_loss.update(velocity_loss.detach())
+        total_loss_value = float(total_loss.detach().cpu())
+        velocity_loss_value = float(velocity_loss.detach().cpu())
+        running_total_loss += total_loss_value
+        running_velocity_loss += velocity_loss_value
+        running_steps += 1
         if args.ssim_loss_weight > 0:
-            running_ssim_loss.update(ssim_loss.detach())
-        epoch_total_loss.update(total_loss.detach())
+            running_ssim_loss += float(ssim_loss.detach().cpu())
+        epoch_total_loss += total_loss_value
+        epoch_steps += 1
 
         loss = total_loss / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
@@ -310,12 +355,10 @@ def train_one_epoch(
                 "step": step + 1,
                 "total_steps": total_steps,
                 "batch_size": int(clean_images.shape[0]),
-                "loss": float(total_loss.detach().cpu()),
-                "running_loss": float(running_total_loss.compute().detach().cpu()),
-                "velocity_loss": float(velocity_loss.detach().cpu()),
-                "running_velocity_loss": float(
-                    running_velocity_loss.compute().detach().cpu()
-                ),
+                "loss": total_loss_value,
+                "running_loss": running_total_loss / max(running_steps, 1),
+                "velocity_loss": velocity_loss_value,
+                "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
                 "lr": learning_rate,
                 "mask_ratio": float(mask_ratio),
                 "optimizer_step": int(should_step),
@@ -325,15 +368,13 @@ def train_one_epoch(
                 train_fields.update(
                     {
                         "ssim_loss": float(ssim_loss.detach().cpu()),
-                        "running_ssim_loss": float(
-                            running_ssim_loss.compute().detach().cpu()
-                        ),
+                        "running_ssim_loss": running_ssim_loss / max(running_steps, 1),
                         "ssim_loss_weight": args.ssim_loss_weight,
                     }
                 )
             logger.log_train(**train_fields)
 
-    return epoch_total_loss.compute().item()
+    return epoch_total_loss / max(epoch_steps, 1)
 
 
 def log_event(logger, event, **fields):
@@ -417,19 +458,27 @@ def save_training_checkpoint(
 def main(args):
     distributed_mode.init_distributed_mode(args)
 
-    is_main_process = distributed_mode.is_main_process()
+    resolve_distributed_log_id(args)
+    node_info = collect_node_info(args)
+    local_rank = int(node_info["local_rank"])
+    hostname = node_info["hostname"]
+    node_log_file = f"log_{hostname}.txt"
     logger = None
-    if is_main_process:
-        logger = SimpleLogger2(
+    if local_rank == 0:
+        logger = NodeLocalLogger(
             output_dir=args.output_dir,
             log_id=args.log_id,
             overwrite=True,
             console=args.log_console,
+            log_file=node_log_file,
+            local_rank=local_rank,
         )
         logger.log_event(
             "script_started",
             job_dir=os.path.dirname(os.path.realpath(__file__)),
+            log_file=node_log_file,
         )
+        logger.log_params(node_info, title="NODE INFORMATION")
         logger.log_argparse_params(args)
 
     device = torch.device(args.device)
