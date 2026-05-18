@@ -568,7 +568,7 @@ def main(args):
         logger.close()
 
     if args.distributed:
-        distributed_mode.barrier()
+        distributed_mode.barrier(device_ids=[args.gpu])
         distributed_mode.destroy()
 
 

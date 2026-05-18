@@ -34,8 +34,8 @@ def is_main_process():
     return get_rank() == 0
 
 
-def barrier():
-    dist.barrier()
+def barrier(device_ids=None):
+    dist.barrier(device_ids=device_ids)
 
 
 def destroy():
@@ -86,4 +86,4 @@ def init_distributed_mode(args):
         rank=args.rank,
         timeout=timedelta(hours=1),
     )
-    torch.distributed.barrier()
+    torch.distributed.barrier(device_ids=[args.gpu])
