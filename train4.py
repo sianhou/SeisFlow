@@ -11,7 +11,7 @@ from torchmetrics import MeanMetric
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from core.dataset import PatchDataset
-from core.logging.logger import DistributedNodeLogger
+from core.logging.logger import DistributedSimpleLogger2
 from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
@@ -338,7 +338,7 @@ def train_one_epoch(
     return epoch_total_loss / max(epoch_steps, 1)
 
 
-def log_global_params(
+def log_training_info(
         logger,
         args,
         dataset,
@@ -360,7 +360,8 @@ def log_global_params(
             "flow_matching",
         ]
     )
-    logger.log_global_params(
+    logger.log_info_block(
+        "GLOBAL PARAMETERS",
         {
             "task": "conditional_flow_matching_seismic_patch_reconstruction",
             "train_data_dir": args.train_data_dir,
@@ -414,7 +415,7 @@ def save_training_checkpoint(
 def main(args):
     distributed_mode.init_distributed_mode(args)
 
-    logger = DistributedNodeLogger(
+    logger = DistributedSimpleLogger2(
         output_dir=args.output_dir,
         log_id=args.log_id,
         distributed=args.distributed,
@@ -422,7 +423,7 @@ def main(args):
         world_size=getattr(args, "world_size", 1),
         local_rank=getattr(args, "gpu", 0),
         overwrite=True,
-        console=args.log_console,
+        console=args.log_console and distributed_mode.get_rank() == 0,
     )
     args.log_id = logger.log_id
     logger.log_event(
@@ -431,7 +432,7 @@ def main(args):
         log_file=logger.log_file,
     )
     logger.log_node_info()
-    logger.log_argparse_params(args)
+    logger.log_info_block("ARGPARSE PARAMETERS", args)
 
     device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()
@@ -455,7 +456,7 @@ def main(args):
     effective_batch_size = (
             args.batch_size * args.grad_accum_steps * distributed_mode.get_world_size()
     )
-    log_global_params(
+    log_training_info(
         logger,
         args=args,
         dataset=dataset,

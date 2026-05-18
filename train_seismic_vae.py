@@ -198,7 +198,7 @@ def main(args):
         ],
     )
     logger.log_event("script_started", job_dir=os.path.dirname(os.path.realpath(__file__)))
-    logger.log_argparse_params(args)
+    logger.log_info_block("ARGPARSE PARAMETERS", args)
 
     device = torch.device(args.device)
     set_random_seed(args.seed)
@@ -229,7 +229,8 @@ def main(args):
             "segyio",
         ]
     )
-    logger.log_global_params(
+    logger.log_info_block(
+        "GLOBAL PARAMETERS",
         {
             "task": "work_package_1_seismic_spatial_vae",
             "data_dir": args.data_dir,

@@ -59,10 +59,14 @@ class SimpleLogger2Test(unittest.TestCase):
         )
 
         logger.log_system_info(include_git=False, include_packages=False)
-        logger.log_argparse_params(
+        logger.log_info_block(
+            "ARGPARSE PARAMETERS",
             argparse.Namespace(model_name="seismic_vae", num_epochs=3)
         )
-        logger.log_global_params({"experiment_name": "logger2_single_process_demo"})
+        logger.log_info_block(
+            "GLOBAL PARAMETERS",
+            {"experiment_name": "logger2_single_process_demo"},
+        )
 
         for epoch in range(1, 4):
             logger.log_train(
@@ -143,9 +147,10 @@ class SimpleLogger2Test(unittest.TestCase):
                 logs=["epoch", "loss", "lr"],
             )
 
-            logger.log_global_params({"epochs": 2, "batch_size": 4})
+            logger.log_info_block("GLOBAL PARAMETERS", {"epochs": 2, "batch_size": 4})
             logger.log_system_info(include_git=False)
-            logger.log_argparse_params(
+            logger.log_info_block(
+                "ARGPARSE PARAMETERS",
                 argparse.Namespace(model_name="vae", learning_rate=1e-4)
             )
             logger.log_train(epoch=1, loss=0.12, lr=1e-4)
@@ -164,9 +169,9 @@ class SimpleLogger2Test(unittest.TestCase):
             self.assertIn("[I] info | event=run_started", log_text)
             self.assertIn("[I] info | event=checkpoint_saved | epoch=1", log_text)
             self.assertIn("[I] warning | event=nonfinite_grad | epoch=1", log_text)
-            self.assertIn("\n\n[I] SYSTEM INFORMATION", log_text)
-            self.assertIn("\n\n[I] ARGPARSE PARAMETERS", log_text)
-            self.assertIn("\n\n[H] log_index epoch loss lr timestamp", log_text)
+            self.assertIn("[I]\n[I]\n[I] SYSTEM INFORMATION", log_text)
+            self.assertIn("[I]\n[I]\n[I] ARGPARSE PARAMETERS", log_text)
+            self.assertIn("[I]\n[I]\n[H] log_index epoch loss lr timestamp", log_text)
             self.assertRegex(log_text, r"\[T\]\s+0\s+1\s+0\.12\s+0\.0001")
             self.assertRegex(log_text, r"\[V\]\s+1\s+1\s+0\.2")
 
@@ -211,7 +216,7 @@ class SimpleLogger2Test(unittest.TestCase):
                 console=False,
                 logs=["epoch", "loss", "is_best"],
             )
-            logger.log_global_params({"ignored": "metadata"})
+            logger.log_info_block("GLOBAL PARAMETERS", {"ignored": "metadata"})
             logger.log_train(epoch=1, loss=0.12, is_best=False)
             logger.log_valid(epoch=1, loss=0.2, is_best=False)
             logger.log_train(epoch=2, loss=0.11, is_best=True)
@@ -255,7 +260,7 @@ class SimpleLogger2Test(unittest.TestCase):
                 (cli_output_dir / "log_index.txt").read_text(encoding="utf-8"),
             )
 
-    def test_existing_run_directory_requires_overwrite_or_append(self):
+    def test_existing_log_file_requires_overwrite_or_append(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             logger = SimpleLogger2(
                 output_dir=temp_dir,
