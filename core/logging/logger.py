@@ -166,9 +166,14 @@ class RunLoggerBase:
         return "w"
 
     def _is_main_process(self) -> bool:
-        if not dist.is_available() or not dist.is_initialized():
-            return True
-        return dist.get_rank() == 0
+        """
+        Return whether this logger instance should emit records.
+
+        The base run logger is intentionally process-agnostic. Distributed
+        variants such as NodeLocalLogger override this hook to suppress writes
+        from non-logging ranks.
+        """
+        return True
 
     def _build_logger(self, channel: str, file_name: str) -> logging.Logger:
         if channel in self._loggers:
@@ -307,13 +312,6 @@ class SimpleLogger2(RunLoggerBase):
 
         raise TypeError("logs must be None, a string, or one sequence of fields.")
 
-    @staticmethod
-    def _validate_log_name(name: str) -> str:
-        safe_name = RunLoggerBase._safe_name(name)
-        if not safe_name:
-            raise ValueError("Log name cannot be empty.")
-        return safe_name
-
     def log(self, prefix: str = "L", **fields: Any):
         self._log_curve_row(prefix, fields)
 
@@ -328,15 +326,11 @@ class SimpleLogger2(RunLoggerBase):
         params: Mapping[str, Any],
         title: str = "GLOBAL PARAMETERS",
     ):
-        if not self._is_main_process():
-            return
-
-        self._write_info(title)
-        for key, value in params.items():
-            info_line = f"{key}: {self._format_value(value)}"
-            self._write_info(info_line)
-        self.log_event("global_params_written")
-        self._write_info_blank_line()
+        self._log_params_block(
+            title=title,
+            params=params,
+            event="global_params_written",
+        )
 
     def log_system_info(
         self,
@@ -358,9 +352,11 @@ class SimpleLogger2(RunLoggerBase):
             include_all_packages=include_all_packages,
             package_names=package_names,
         )
-        self.log_info_block(title, info)
-        self.log_event("system_info_written")
-        self._write_info_blank_line()
+        self._log_params_block(
+            title=title,
+            params=info,
+            event="system_info_written",
+        )
 
     def log_argparse_params(
         self,
@@ -373,10 +369,11 @@ class SimpleLogger2(RunLoggerBase):
         Pass an argparse.Namespace from parser.parse_args(). Mappings and
         simple objects with __dict__ are also accepted for convenience.
         """
-        params = self._normalize_params(args)
-        self.log_info_block(title, params)
-        self.log_event("argparse_params_written")
-        self._write_info_blank_line()
+        self._log_params_block(
+            title=title,
+            params=args,
+            event="argparse_params_written",
+        )
 
     def log_params(
         self,
@@ -386,21 +383,34 @@ class SimpleLogger2(RunLoggerBase):
         """
         Record manually supplied run parameters with [I] lines.
         """
-        self.log_info_block(title, self._normalize_params(params))
-        self.log_event("params_written")
+        self._log_params_block(
+            title=title,
+            params=params,
+            event="params_written",
+            blank_line=False,
+        )
 
     def log_info_block(
         self,
         title: str,
         params: Mapping[str, Any],
     ):
-        if not self._is_main_process():
-            return
+        self._log_params_block(title=title, params=params, blank_line=False)
 
+    def _log_params_block(
+        self,
+        title: str,
+        params: Any,
+        event: Optional[str] = None,
+        blank_line: bool = True,
+    ):
         self._write_info(title)
-        for key, value in params.items():
-            info_line = f"{key}: {self._format_value(value)}"
-            self._write_info(info_line)
+        for key, value in self._normalize_params(params).items():
+            self._write_info(f"{key}: {self._format_value(value)}")
+        if event:
+            self.log_event(event)
+        if blank_line:
+            self._write_info_blank_line()
 
     @staticmethod
     def _normalize_params(params: Any) -> Mapping[str, Any]:
@@ -663,13 +673,9 @@ class SimpleLogger2(RunLoggerBase):
         self._write_prefixed(prefix, event_fields, level=level, status=status_name)
 
     def _write_info(self, message: str, level: int = logging.INFO):
-        if not self._is_main_process():
-            return
         self._write_prefixed_message("I", message, level=level)
 
     def _write_info_blank_line(self, level: int = logging.INFO):
-        if not self._is_main_process():
-            return
         self._log(self.log_name, level, "")
 
     def _write_prefixed_message(
@@ -678,20 +684,14 @@ class SimpleLogger2(RunLoggerBase):
         message: str,
         level: int = logging.INFO,
     ):
-        if not self._is_main_process():
-            return
         self._log(self.log_name, level, f"[{prefix}] {message}")
 
     def _write_header(self, fields: Sequence[str]):
-        if not self._is_main_process():
-            return
         header = self._with_timestamp_column(fields)
         self._header = header
         self._log(self.log_name, logging.INFO, "[H] " + " ".join(["log_index", *header]))
 
     def _write_log_values(self, prefix: str, values: Sequence[Any]):
-        if not self._is_main_process():
-            return
         line_prefix = self._validate_line_prefix(prefix)
         log_index = self._log_counter
         formatted_values = [
@@ -708,8 +708,6 @@ class SimpleLogger2(RunLoggerBase):
         level: int = logging.INFO,
         status: Optional[str] = None,
     ):
-        if not self._is_main_process():
-            return
         status_text = f"{status} | " if status else ""
         self._log(
             self.log_name,
@@ -722,9 +720,6 @@ class SimpleLogger2(RunLoggerBase):
         prefix: str,
         fields: Mapping[str, Any],
     ):
-        if not self._is_main_process():
-            return
-
         record = dict(fields)
 
         header = self._with_timestamp_column(self._configured_header or list(record.keys()))
@@ -750,6 +745,115 @@ class SimpleLogger2(RunLoggerBase):
         if text in {"H", "I"}:
             raise ValueError("log prefix cannot be 'H' or 'I'.")
         return text
+
+
+class NodeLocalLogger(SimpleLogger2):
+    """
+    DDP helper logger that writes only from one local process per node.
+
+    In torchrun jobs this is typically used with ``local_rank=args.gpu`` and a
+    node-specific ``log_file`` such as ``log_node012.txt``. It keeps one run
+    directory shared across the whole distributed job while avoiding multiple
+    local ranks writing to the same node log file.
+    """
+
+    def __init__(self, *args, local_rank=0, **kwargs):
+        self.local_rank = int(local_rank)
+        super().__init__(*args, **kwargs)
+
+    def _is_main_process(self):
+        return self.local_rank == 0
+
+
+def resolve_distributed_log_id(log_id=None, distributed=False):
+    """
+    Resolve one shared log_id for all ranks in a distributed job.
+
+    Rank 0 creates the timestamp-based id, then broadcasts it to every rank.
+    """
+    if log_id is not None:
+        return log_id
+    if not distributed:
+        return None
+
+    if dist.is_available() and dist.is_initialized() and dist.get_rank() == 0:
+        log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_id_holder = [log_id]
+    dist.broadcast_object_list(log_id_holder, src=0)
+    return log_id_holder[0]
+
+
+def collect_node_info(
+        rank=0,
+        world_size=1,
+        local_rank=0,
+        hostname=None,
+        environ=None,
+):
+    environ = os.environ if environ is None else environ
+    return {
+        "hostname": hostname or socket.gethostname(),
+        "rank": rank,
+        "world_size": world_size,
+        "local_rank": local_rank,
+        "local_world_size": environ.get("LOCAL_WORLD_SIZE", ""),
+        "node_rank": environ.get("GROUP_RANK", ""),
+        "master_addr": environ.get("MASTER_ADDR", ""),
+        "master_port": environ.get("MASTER_PORT", ""),
+    }
+
+
+class DistributedNodeLogger(NodeLocalLogger):
+    """
+    Node-scoped DDP logger with a SimpleLogger2-like interface.
+
+    All ranks should instantiate this class. It resolves a shared run ``log_id``
+    across the distributed job, writes one log file per hostname, and only the
+    local rank 0 process on each node emits records.
+    """
+
+    def __init__(
+            self,
+            output_dir: str = "./results",
+            log_id: Optional[str] = None,
+            distributed: bool = False,
+            rank: int = 0,
+            world_size: int = 1,
+            local_rank: int = 0,
+            hostname: Optional[str] = None,
+            environ: Optional[Mapping[str, str]] = None,
+            log_file: Optional[str] = None,
+            **kwargs,
+    ):
+        self.node_info = collect_node_info(
+            rank=rank,
+            world_size=world_size,
+            local_rank=local_rank,
+            hostname=hostname,
+            environ=environ,
+        )
+        resolved_log_id = resolve_distributed_log_id(
+            log_id=log_id,
+            distributed=distributed,
+        )
+        if log_file is None:
+            if distributed:
+                log_file = f"log_{self.node_info['hostname']}.txt"
+            else:
+                log_file = "log.txt"
+
+        super().__init__(
+            output_dir=output_dir,
+            log_id=resolved_log_id,
+            log_file=log_file,
+            local_rank=local_rank,
+            **kwargs,
+        )
+        self.distributed = distributed
+        self.log_file = log_file
+
+    def log_node_info(self, title: str = "NODE INFORMATION"):
+        self.log_params(self.node_info, title=title)
 
 
 if __name__ == "__main__":

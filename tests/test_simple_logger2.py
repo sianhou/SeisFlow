@@ -1,5 +1,7 @@
 import argparse
 import logging
+import multiprocessing as mp
+import shutil
 import sys
 import tempfile
 import types
@@ -27,13 +29,31 @@ from core.logging import LogReader, SimpleLogger2
 from core.logging.read_log import main as read_log_main
 
 
+DEMO_ROOT = PROJECT_ROOT / "tests" / "logger2_demo_runs"
+
+
+def _write_rank_log(output_dir, log_id, rank):
+    logger = SimpleLogger2(
+        output_dir=output_dir,
+        log_id=log_id,
+        append=True,
+        console=False,
+        log_file=f"log_rank{rank}.txt",
+        logs=["rank", "step", "loss"],
+    )
+    logger.log_event("rank_started", rank=rank)
+    logger.log_train(rank=rank, step=1, loss=0.1 * (rank + 1))
+    logger.log_event("rank_finished", rank=rank)
+    logger.close()
+
+
 class SimpleLogger2Test(unittest.TestCase):
-    def test_writes_single_visible_demo_log(self):
-        demo_root = PROJECT_ROOT / "tests" / "logger2_demo_runs"
+    def test_01_single_process_log_file(self):
+        log_id = "single_process"
+        shutil.rmtree(DEMO_ROOT / log_id, ignore_errors=True)
         logger = SimpleLogger2(
-            output_dir=demo_root,
-            log_id="visible_demo",
-            overwrite=True,
+            output_dir=DEMO_ROOT,
+            log_id=log_id,
             console=False,
             logs=["epoch", "loss", "psnr", "mae", "is_best"],
         )
@@ -42,7 +62,7 @@ class SimpleLogger2Test(unittest.TestCase):
         logger.log_argparse_params(
             argparse.Namespace(model_name="seismic_vae", num_epochs=3)
         )
-        logger.log_global_params({"experiment_name": "logger2_visible_demo"})
+        logger.log_global_params({"experiment_name": "logger2_single_process_demo"})
 
         for epoch in range(1, 4):
             logger.log_train(
@@ -62,11 +82,57 @@ class SimpleLogger2Test(unittest.TestCase):
             if epoch == 2:
                 logger.log_event("checkpoint_saved", epoch=epoch)
 
+        logger.log_event("single_process_finished")
         logger.close()
 
-        print(f"\nSimpleLogger2 demo run: {logger.run_dir}")
-        self.assertTrue(logger.run_dir.is_dir())
-        self.assertTrue((logger.run_dir / "log.txt").is_file())
+        log_path = DEMO_ROOT / log_id / "log.txt"
+        self.assertTrue(log_path.is_file())
+        log_text = log_path.read_text(encoding="utf-8")
+        self.assertIn("[I] info | event=run_started", log_text)
+        self.assertIn("[I] SYSTEM INFORMATION", log_text)
+        self.assertIn("[I] ARGPARSE PARAMETERS", log_text)
+        self.assertIn("[I] GLOBAL PARAMETERS", log_text)
+        self.assertIn("[I] info | event=checkpoint_saved | epoch=2", log_text)
+        self.assertIn("[I] info | event=single_process_finished", log_text)
+        self.assertIn("[H] log_index epoch loss psnr mae is_best timestamp", log_text)
+        self.assertRegex(log_text, r"\[T\]\s+0\s+1\s+0\.5")
+        self.assertRegex(log_text, r"\[V\]\s+1\s+1\s+0\.62\s+23")
+
+    def test_02_spawn_four_processes_write_rank_logs(self):
+        log_id = "spawn_four_ranks"
+        run_dir = DEMO_ROOT / log_id
+        shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        context = mp.get_context("spawn")
+        processes = [
+            context.Process(
+                target=_write_rank_log,
+                args=(str(DEMO_ROOT), log_id, rank),
+            )
+            for rank in range(4)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=30)
+            self.assertEqual(process.exitcode, 0)
+
+        self.assertEqual(
+            {f"log_rank{rank}.txt" for rank in range(4)},
+            {path.name for path in run_dir.iterdir()},
+        )
+        for rank in range(4):
+            log_text = (run_dir / f"log_rank{rank}.txt").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(f"[I] info | event=rank_started | rank={rank}", log_text)
+            self.assertIn(f"[I] info | event=rank_finished | rank={rank}", log_text)
+            self.assertIn("[H] log_index rank step loss timestamp", log_text)
+            self.assertRegex(
+                log_text,
+                rf"\[T\]\s+0\s+{rank}\s+1\s+{0.1 * (rank + 1):.6g}",
+            )
 
     def test_single_log_file_records_info_events_and_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:

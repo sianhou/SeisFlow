@@ -1,18 +1,17 @@
 import argparse
 import gc
 import os
-import socket
 import time
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torchmetrics import MeanMetric
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from core.dataset import PatchDataset
-from core.logging.logger import SimpleLogger2
+from core.logging.logger import DistributedNodeLogger
 from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
@@ -59,43 +58,6 @@ MODEL_BUILDERS = {
     "dit": DiT,
     "unet": UNetModel,
 }
-
-
-class NodeLocalLogger(SimpleLogger2):
-    def __init__(self, *args, local_rank=0, **kwargs):
-        self.local_rank = local_rank
-        super().__init__(*args, **kwargs)
-
-    def _is_main_process(self):
-        return self.local_rank == 0
-
-
-def resolve_distributed_log_id(args):
-    if args.log_id is not None:
-        return args.log_id
-    if not getattr(args, "distributed", False):
-        return None
-
-    log_id = None
-    if distributed_mode.is_main_process():
-        log_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    log_id_holder = [log_id]
-    torch.distributed.broadcast_object_list(log_id_holder, src=0)
-    args.log_id = log_id_holder[0]
-    return args.log_id
-
-
-def collect_node_info(args):
-    return {
-        "hostname": socket.gethostname(),
-        "rank": getattr(args, "rank", 0),
-        "world_size": getattr(args, "world_size", 1),
-        "local_rank": getattr(args, "gpu", 0),
-        "local_world_size": os.environ.get("LOCAL_WORLD_SIZE", ""),
-        "node_rank": os.environ.get("GROUP_RANK", ""),
-        "master_addr": os.environ.get("MASTER_ADDR", ""),
-        "master_port": os.environ.get("MASTER_PORT", ""),
-    }
 
 
 def build_parser():
@@ -349,37 +311,31 @@ def train_one_epoch(
         )
 
         learning_rate = optimizer.param_groups[0]["lr"]
-        if logger is not None:
-            train_fields = {
-                "epoch": epoch + 1,
-                "step": step + 1,
-                "total_steps": total_steps,
-                "batch_size": int(clean_images.shape[0]),
-                "loss": total_loss_value,
-                "running_loss": running_total_loss / max(running_steps, 1),
-                "velocity_loss": velocity_loss_value,
-                "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
-                "lr": learning_rate,
-                "mask_ratio": float(mask_ratio),
-                "optimizer_step": int(should_step),
-                "step_time_sec": time.time() - step_start_time,
-            }
-            if args.ssim_loss_weight > 0:
-                train_fields.update(
-                    {
-                        "ssim_loss": float(ssim_loss.detach().cpu()),
-                        "running_ssim_loss": running_ssim_loss / max(running_steps, 1),
-                        "ssim_loss_weight": args.ssim_loss_weight,
-                    }
-                )
-            logger.log_train(**train_fields)
+        train_fields = {
+            "epoch": epoch + 1,
+            "step": step + 1,
+            "total_steps": total_steps,
+            "batch_size": int(clean_images.shape[0]),
+            "loss": total_loss_value,
+            "running_loss": running_total_loss / max(running_steps, 1),
+            "velocity_loss": velocity_loss_value,
+            "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
+            "lr": learning_rate,
+            "mask_ratio": float(mask_ratio),
+            "optimizer_step": int(should_step),
+            "step_time_sec": time.time() - step_start_time,
+        }
+        if args.ssim_loss_weight > 0:
+            train_fields.update(
+                {
+                    "ssim_loss": float(ssim_loss.detach().cpu()),
+                    "running_ssim_loss": running_ssim_loss / max(running_steps, 1),
+                    "ssim_loss_weight": args.ssim_loss_weight,
+                }
+            )
+        logger.log_train(**train_fields)
 
     return epoch_total_loss / max(epoch_steps, 1)
-
-
-def log_event(logger, event, **fields):
-    if logger is not None:
-        logger.log_event(event, **fields)
 
 
 def log_global_params(
@@ -458,44 +414,39 @@ def save_training_checkpoint(
 def main(args):
     distributed_mode.init_distributed_mode(args)
 
-    resolve_distributed_log_id(args)
-    node_info = collect_node_info(args)
-    local_rank = int(node_info["local_rank"])
-    hostname = node_info["hostname"]
-    node_log_file = f"log_{hostname}.txt"
-    logger = None
-    if local_rank == 0:
-        logger = NodeLocalLogger(
-            output_dir=args.output_dir,
-            log_id=args.log_id,
-            overwrite=True,
-            console=args.log_console,
-            log_file=node_log_file,
-            local_rank=local_rank,
-        )
-        logger.log_event(
-            "script_started",
-            job_dir=os.path.dirname(os.path.realpath(__file__)),
-            log_file=node_log_file,
-        )
-        logger.log_params(node_info, title="NODE INFORMATION")
-        logger.log_argparse_params(args)
+    logger = DistributedNodeLogger(
+        output_dir=args.output_dir,
+        log_id=args.log_id,
+        distributed=args.distributed,
+        rank=getattr(args, "rank", 0),
+        world_size=getattr(args, "world_size", 1),
+        local_rank=getattr(args, "gpu", 0),
+        overwrite=True,
+        console=args.log_console,
+    )
+    args.log_id = logger.log_id
+    logger.log_event(
+        "script_started",
+        job_dir=os.path.dirname(os.path.realpath(__file__)),
+        log_file=logger.log_file,
+    )
+    logger.log_node_info()
+    logger.log_argparse_params(args)
 
     device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()
     set_random_seed(seed)
 
-    log_event(logger, "dataset_initializing", train_data_dir=args.train_data_dir)
+    logger.log_event("dataset_initializing", train_data_dir=args.train_data_dir)
     dataset, train_sampler, train_loader = build_dataloader(args)
-    log_event(
-        logger,
+    logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
         num_batches=len(train_loader),
         sampler=str(train_sampler),
     )
 
-    log_event(logger, "model_initializing", model_arch=args.model_arch)
+    logger.log_event("model_initializing", model_arch=args.model_arch)
     model = build_model(args.model_arch, device)
     model_without_ddp = model
 
@@ -524,7 +475,7 @@ def main(args):
         )
         model_without_ddp = model.module
 
-    log_event(logger, "optimizer_initializing")
+    logger.log_event("optimizer_initializing")
     optimizer = torch.optim.AdamW(
         model_without_ddp.parameters(),
         lr=args.learning_rate,
@@ -545,8 +496,7 @@ def main(args):
             factor=1.0,
         )
 
-    log_event(
-        logger,
+    logger.log_event(
         "optimizer_initialized",
         optimizer=str(optimizer),
         lr_scheduler=str(lr_scheduler),
@@ -558,9 +508,9 @@ def main(args):
     if args.ssim_loss_weight > 0:
         ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
 
-    log_event(logger, "training_started")
+    logger.log_event("training_started")
     start_time = time.time()
-    checkpoint_dir = logger.run_dir if logger is not None else Path(args.output_dir)
+    checkpoint_dir = logger.run_dir
 
     for epoch in range(args.num_epochs):
         if args.distributed:
@@ -579,8 +529,7 @@ def main(args):
             epoch=epoch,
         )
         lr_scheduler.step()
-        log_event(
-            logger,
+        logger.log_event(
             "epoch_finished",
             epoch=epoch + 1,
             mean_loss=epoch_loss,
@@ -599,22 +548,19 @@ def main(args):
                 epoch=epoch,
                 output_dir=checkpoint_dir,
             )
-            log_event(
-                logger,
+            logger.log_event(
                 "checkpoint_saved",
                 epoch=epoch + 1,
                 path=str(checkpoint_path),
             )
 
     total_time = time.time() - start_time
-    log_event(
-        logger,
+    logger.log_event(
         "training_finished",
         total_time_sec=total_time,
         run_dir=str(checkpoint_dir),
     )
-    if logger is not None:
-        logger.close()
+    logger.close()
 
     if args.distributed:
         distributed_mode.barrier(device_ids=[args.gpu])
