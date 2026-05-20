@@ -35,7 +35,13 @@ def is_main_process():
 
 
 def barrier(device_ids=None):
-    dist.barrier(device_ids=device_ids)
+    if device_ids is None:
+        dist.barrier()
+        return
+    try:
+        dist.barrier(device_ids=device_ids)
+    except TypeError:
+        dist.barrier()
 
 
 def destroy():
@@ -86,4 +92,4 @@ def init_distributed_mode(args):
         rank=args.rank,
         timeout=timedelta(hours=1),
     )
-    torch.distributed.barrier(device_ids=[args.gpu])
+    barrier([args.gpu])
