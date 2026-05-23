@@ -15,49 +15,8 @@ from core.logging.logger import DistributedSimpleLogger2
 from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
-from models.dit import DiT
-from models.unet import UNetModel
+from models.reconstruction_model_configs import MODEL_CONFIGS, build_model
 from training import distributed_mode
-
-MODEL_CONFIGS = {
-    "dit": {
-        "in_channels": 3,
-        "out_channels": 1,
-        "input_size": 32,
-        "patch_size": 4,
-        "hidden_size": 384,
-        "depth": 8,
-        "num_heads": 8,
-        "mlp_ratio": 4.0,
-        "num_classes": None,
-        "class_dropout_prob": 0.1,
-    },
-    "unet": {
-        "in_channels": 3,
-        "model_channels": 32,
-        "out_channels": 1,
-        "num_res_blocks": 2,
-        "attention_resolutions": [],
-        "dropout": 0.2,
-        "channel_mult": [1, 2, 4, 8],
-        "conv_resample": True,
-        "dims": 2,
-        "num_classes": None,
-        "use_checkpoint": False,
-        "num_heads": 4,
-        "num_head_channels": -1,
-        "num_heads_upsample": -1,
-        "use_scale_shift_norm": True,
-        "resblock_updown": True,
-        "use_new_attention_order": True,
-        "with_fourier_features": False,
-    },
-}
-
-MODEL_BUILDERS = {
-    "dit": DiT,
-    "unet": UNetModel,
-}
 
 
 def build_parser():
@@ -218,12 +177,6 @@ def build_dataloader(args):
     )
 
     return dataset, sampler, dataloader
-
-
-def build_model(model_name, device):
-    model_class = MODEL_BUILDERS[model_name]
-    model = model_class(**MODEL_CONFIGS[model_name]).to(device)
-    return model
 
 
 def train_one_epoch(
