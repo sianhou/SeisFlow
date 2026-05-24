@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -141,6 +142,7 @@ def sample_one_shot(
         time_grid: torch.Tensor,
         args,
         logger,
+        shot_index: int,
 ):
     mask_ratio = float(args.mask_ratio)
     mask = generate_random_row_mask(sample, missing_ratio=mask_ratio)
@@ -166,28 +168,16 @@ def sample_one_shot(
 
     num_patches = int(normalized_clean_patches.shape[0])
     num_patch_batches = (num_patches + args.batch_size - 1) // args.batch_size
-    logger.log_event(
-        "patch_sampling_started",
-        num_patches=num_patches,
-        batch_size=args.batch_size,
-        num_patch_batches=num_patch_batches,
-    )
+
     reconstructed_normalized_batches = []
     for batch_index, start in enumerate(
             range(0, num_patches, args.batch_size),
-            start=1,
+            start=0,
     ):
         end = min(start + args.batch_size, num_patches)
-        logger.log_event(
-            "patch_batch_started",
-            batch_index=batch_index,
-            num_patch_batches=num_patch_batches,
-            patch_start=start,
-            patch_end=end,
-            batch_size=end - start,
-        )
         missed_batch = normalized_missed_patches[start:end]
         mask_batch = mask_patches[start:end]
+        step_start_time = time.time()
         sampled_batch = solver.sample(
             time_grid=time_grid,
             x_init=torch.randn_like(missed_batch),
@@ -205,19 +195,22 @@ def sample_one_shot(
         reconstructed_normalized_batches.append(
             missed_batch + (1.0 - mask_batch) * sampled_batch
         )
-        logger.log_event(
-            "patch_batch_finished",
-            batch_index=batch_index,
-            num_patch_batches=num_patch_batches,
-            patch_start=start,
-            patch_end=end,
+        logger.log_valid(
+            shot=shot_index,
+            step=batch_index,
+            num_batch=num_patch_batches,
+            batch_start=start,
+            batch_end=end,
+            mask_ratio=mask_ratio,
+            psnr="",
+            mae="",
+            step_time_sec=time.time() - step_start_time,
         )
 
     reconstructed_normalized_patches = torch.cat(
         reconstructed_normalized_batches,
         dim=0,
     )
-    logger.log_event("patch_sampling_finished", num_patches=num_patches)
 
     # Use clean patch statistics to map predictions back for evaluation/visualization.
     reconstructed_patches = (reconstructed_normalized_patches * patch_scales).unsqueeze(0)
@@ -233,6 +226,8 @@ def sample_one_shot(
         "mask": mask,
         "missed": missed,
         "recon": reconstructed_sample,
+        "num_patches": num_patches,
+        "num_patch_batches": num_patch_batches,
     }
 
 
@@ -280,6 +275,17 @@ def main(args):
         log_id=args.log_id,
         overwrite=True,
         console=args.log_console,
+        logs=[
+            "shot",
+            "step",
+            "num_batch",
+            "batch_start",
+            "batch_end",
+            "mask_ratio",
+            "psnr",
+            "mae",
+            "step_time_sec",
+        ],
     )
     output_dir = logger.run_dir
     logger.log_event(
@@ -336,18 +342,32 @@ def main(args):
         time_grid=time_grid,
         args=args,
         logger=logger,
+        shot_index=args.shot_index,
     )
     shot_dir, psnr, mae = save_shot_outputs(
         result,
         args.shot_index,
         output_dir / f"shot_{args.shot_index:04d}",
     )
+    logger.log_valid(
+        shot=args.shot_index,
+        step=result["num_patch_batches"],
+        num_batch=result["num_patch_batches"],
+        batch_start="",
+        batch_end="",
+        mask_ratio=result["mask_ratio"],
+        psnr=psnr,
+        mae=mae,
+        step_time_sec="",
+    )
     logger.log_event(
-        "sampling_finished",
+        "shot_finished",
         shot_index=args.shot_index,
         mask_ratio=result["mask_ratio"],
         psnr=psnr,
         mae=mae,
+        num_patches=result["num_patches"],
+        num_patch_batches=result["num_patch_batches"],
         saved=str(shot_dir),
     )
 
