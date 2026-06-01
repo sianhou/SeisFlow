@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torchmetrics import MeanMetric
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from core.dataset import PatchDataset
@@ -23,7 +22,8 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description=(
             "Train a conditional flow-matching model for seismic patch reconstruction with random row masking."
-        )
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--train_data_dir",
