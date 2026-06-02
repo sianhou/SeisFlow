@@ -4,34 +4,25 @@ import os
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from core.dataset import PatchDataset
 from core.logging.logger import DistributedSimpleLogger2
-from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
-from flow_matching.path import CondOTProbPath
-from models.reconstruction_model_configs import MODEL_CONFIGS, build_model
+from models.seismic_vae import SeismicSpatialVAE, kl_divergence
 from training import distributed_mode
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description=(
-            "Train a conditional flow-matching model for seismic patch reconstruction with random row masking."
-        ),
+        description="Train a seismic spatial VAE on single-channel seismic patch NPY files.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--train_data_dir",
         default="./train_dataset",
-        help=(
-            "Directory containing training patch NPY files. If using a VAE, "
-            "patch values should be normalized to [-1, 1]."
-        ),
+        help="Directory containing training patch NPY files normalized to [-1, 1].",
     )
     parser.add_argument(
         "--output_dir",
@@ -39,14 +30,8 @@ def build_parser():
         help="Directory used for logs and checkpoints.",
     )
     parser.add_argument(
-        "--model_arch",
-        choices=sorted(MODEL_CONFIGS.keys()),
-        default="dit",
-        help="Model architecture to train.",
-    )
-    parser.add_argument(
         "--batch_size",
-        default=32,
+        default=16,
         type=int,
         help="Mini-batch size per process.",
     )
@@ -58,7 +43,7 @@ def build_parser():
     )
     parser.add_argument(
         "--num_epochs",
-        default=1000,
+        default=100,
         type=int,
         help="Total number of training epochs.",
     )
@@ -75,20 +60,6 @@ def build_parser():
         help="Learning-rate schedule to use during training.",
     )
     parser.add_argument(
-        "--missing_ratio_range",
-        nargs=2,
-        type=float,
-        default=[0.3, 0.7],
-        metavar=("MIN", "MAX"),
-        help="Range of random missing ratios sampled per batch.",
-    )
-    parser.add_argument(
-        "--ssim_loss_weight",
-        default=0.0,
-        type=float,
-        help="Weight for optional SSIM reconstruction loss. Set 0 to disable.",
-    )
-    parser.add_argument(
         "--num_workers",
         default=4,
         type=int,
@@ -101,7 +72,7 @@ def build_parser():
     )
     parser.add_argument(
         "--save_every_epochs",
-        default=50,
+        default=10,
         type=int,
         help="Save a checkpoint every N epochs.",
     )
@@ -137,6 +108,56 @@ def build_parser():
         type=float,
         default=0.95,
         help="Second beta coefficient for AdamW.",
+    )
+    parser.add_argument(
+        "--input_size",
+        default=256,
+        choices=[128, 256, 512],
+        type=int,
+        help="Input patch height and width.",
+    )
+    parser.add_argument(
+        "--input_channels",
+        default=1,
+        type=int,
+        help="Number of input patch channels.",
+    )
+    parser.add_argument(
+        "--latent_channels",
+        default=4,
+        type=int,
+        help="Latent channel count for [B,C,latent_size,latent_size].",
+    )
+    parser.add_argument(
+        "--latent_size",
+        default=32,
+        choices=[16, 32, 64],
+        type=int,
+        help="Spatial latent size for the CxNxN latent map.",
+    )
+    parser.add_argument(
+        "--hidden_channels",
+        default=32,
+        type=int,
+        help="Base hidden channel count for the VAE encoder and decoder.",
+    )
+    parser.add_argument(
+        "--channel_multipliers",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Optional encoder/decoder channel multipliers. Defaults to powers of two.",
+    )
+    parser.add_argument(
+        "--autoencoder",
+        action="store_true",
+        help="Disable latent sampling and use z=mu.",
+    )
+    parser.add_argument(
+        "--kl_weight",
+        default=0.0,
+        type=float,
+        help="Weight for optional KL regularization. Set 0 to disable.",
     )
     parser.add_argument(
         "--dist_on_itp",
@@ -179,13 +200,49 @@ def build_dataloader(args):
     return dataset, sampler, dataloader
 
 
+def build_model(args, device):
+    model = SeismicSpatialVAE(
+        input_channels=args.input_channels,
+        output_channels=1,
+        latent_channels=args.latent_channels,
+        input_size=args.input_size,
+        latent_size=args.latent_size,
+        hidden_channels=args.hidden_channels,
+        channel_multipliers=tuple(args.channel_multipliers)
+        if args.channel_multipliers
+        else None,
+        use_vae=not args.autoencoder,
+    ).to(device)
+    return model
+
+
+def compute_loss(outputs, clean_images, args):
+    recon = outputs["recon"]
+    mse = F.mse_loss(recon, clean_images)
+    kl = kl_divergence(outputs["mu"], outputs["logvar"])
+    total = mse + args.kl_weight * kl
+    return {
+        "mse": mse,
+        "kl": kl,
+        "total": total,
+    }
+
+
+def training_mode_name(args):
+    if args.autoencoder and args.kl_weight > 0:
+        return "autoencoder_kl_regularized"
+    if args.autoencoder:
+        return "autoencoder"
+    if args.kl_weight > 0:
+        return "weak_kl_vae"
+    return "sampled_vae_no_kl"
+
+
 def train_one_epoch(
         model,
         dataloader,
         optimizer,
         scaler,
-        flow_path,
-        ssim_metric,
         device,
         args,
         logger,
@@ -195,8 +252,8 @@ def train_one_epoch(
     model.train(True)
 
     running_total_loss = 0.0
-    running_velocity_loss = 0.0
-    running_ssim_loss = 0.0
+    running_mse_loss = 0.0
+    running_kl_loss = 0.0
     running_steps = 0
     epoch_total_loss = 0.0
     epoch_steps = 0
@@ -206,56 +263,37 @@ def train_one_epoch(
         if step % args.grad_accum_steps == 0:
             optimizer.zero_grad()
             running_total_loss = 0.0
-            running_velocity_loss = 0.0
-            running_ssim_loss = 0.0
+            running_mse_loss = 0.0
+            running_kl_loss = 0.0
             running_steps = 0
 
         clean_images = batch.to(device, non_blocking=True)
-        if clean_images.shape[1] != 1:
+        if clean_images.shape[1] != args.input_channels:
             raise ValueError(
-                f"train4.py expects single-channel patches, got shape {tuple(clean_images.shape)}."
+                f"train_vae.py expected {args.input_channels} input channels, got {clean_images.shape[1]}."
             )
-        mask_ratio = np.random.uniform(*args.missing_ratio_range)
-        observed_mask = generate_random_row_mask(x=clean_images, missing_ratio=mask_ratio)
-        masked_images = observed_mask * clean_images
-        conditioning = torch.cat((masked_images, observed_mask), dim=1)
-
-        noise = torch.randn_like(clean_images)
-        timesteps = torch.rand(clean_images.shape[0], device=device)
-        flow_sample = flow_path.sample(t=timesteps, x_0=noise, x_1=clean_images)
-        noisy_images = flow_sample.x_t
-        target_velocity = flow_sample.dx_t
+        if clean_images.shape[-2:] != (args.input_size, args.input_size):
+            raise ValueError(
+                f"train_vae.py expected patches with shape {args.input_size}x{args.input_size}, "
+                f"got {tuple(clean_images.shape[-2:])}."
+            )
 
         with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
-            predicted_velocity = model(
-                noisy_images,
-                timesteps,
-                extra={"concat_conditioning": conditioning},
-            )
-            velocity_loss = F.mse_loss(predicted_velocity, target_velocity)
+            outputs = model(clean_images)
+            losses = compute_loss(outputs, clean_images, args)
 
-            total_loss = velocity_loss
-            ssim_loss = torch.zeros((), device=device)
-            if args.ssim_loss_weight > 0:
-                timesteps_reshaped = timesteps.view(-1, 1, 1, 1)
-                predicted_images = noisy_images + (1.0 - timesteps_reshaped) * predicted_velocity
-                ssim_score = ssim_metric(predicted_images, clean_images)
-                ssim_loss = 1.0 - ssim_score
-                total_loss = total_loss + args.ssim_loss_weight * ssim_loss
-
-        total_loss_value = float(total_loss.detach().cpu())
-        velocity_loss_value = float(velocity_loss.detach().cpu())
+        total_loss_value = float(losses["total"].detach().cpu())
+        mse_loss_value = float(losses["mse"].detach().cpu())
+        kl_loss_value = float(losses["kl"].detach().cpu())
         running_total_loss += total_loss_value
-        running_velocity_loss += velocity_loss_value
+        running_mse_loss += mse_loss_value
+        running_kl_loss += kl_loss_value
         running_steps += 1
-        if args.ssim_loss_weight > 0:
-            running_ssim_loss += float(ssim_loss.detach().cpu())
         epoch_total_loss += total_loss_value
         epoch_steps += 1
 
-        loss = total_loss / args.grad_accum_steps
+        loss = losses["total"] / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
-        step_start_time = time.time()
         scaler(
             loss,
             optimizer,
@@ -263,30 +301,24 @@ def train_one_epoch(
             update_grad=should_step,
         )
 
-        learning_rate = optimizer.param_groups[0]["lr"]
-        train_fields = {
-            "epoch": epoch + 1,
-            "step": step + 1,
-            "total_steps": total_steps,
-            "batch_size": int(clean_images.shape[0]),
-            "loss": total_loss_value,
-            "running_loss": running_total_loss / max(running_steps, 1),
-            "velocity_loss": velocity_loss_value,
-            "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
-            "lr": learning_rate,
-            "mask_ratio": float(mask_ratio),
-            "optimizer_step": int(should_step),
-            "step_time_sec": time.time() - step_start_time,
-        }
-        if args.ssim_loss_weight > 0:
-            train_fields.update(
-                {
-                    "ssim_loss": float(ssim_loss.detach().cpu()),
-                    "running_ssim_loss": running_ssim_loss / max(running_steps, 1),
-                    "ssim_loss_weight": args.ssim_loss_weight,
-                }
-            )
-        logger.log_train(**train_fields)
+        if should_step:
+            optimizer.zero_grad()
+
+        logger.log_train(
+            epoch=epoch + 1,
+            step=step + 1,
+            total_steps=total_steps,
+            batch_size=int(clean_images.shape[0]),
+            loss=total_loss_value,
+            running_loss=running_total_loss / max(running_steps, 1),
+            mse_loss=mse_loss_value,
+            running_mse_loss=running_mse_loss / max(running_steps, 1),
+            kl_loss=kl_loss_value,
+            running_kl_loss=running_kl_loss / max(running_steps, 1),
+            kl_weight=args.kl_weight,
+            lr=optimizer.param_groups[0]["lr"],
+            optimizer_step_taken=int(should_step),
+        )
 
     return epoch_total_loss / max(epoch_steps, 1)
 
@@ -304,24 +336,24 @@ def log_training_info(
 ):
     if logger is None:
         return
-    logger.log_system_info(
-        package_names=[
-            "torch",
-            "torchvision",
-            "torchmetrics",
-            "numpy",
-            "flow_matching",
-        ]
-    )
+    logger.log_system_info()
     logger.log_info_block(
         "GLOBAL PARAMETERS",
         {
-            "task": "conditional_flow_matching_seismic_patch_reconstruction",
+            "task": "seismic_spatial_vae",
             "train_data_dir": args.train_data_dir,
             "dataset_size": len(dataset),
             "num_batches_per_epoch": len(dataloader),
-            "model_arch": args.model_arch,
-            "model_config": MODEL_CONFIGS[args.model_arch],
+            "normalization": "pre_normalized_minus_one_to_one",
+            "input_channels": args.input_channels,
+            "output_channels": 1,
+            "input_size": args.input_size,
+            "latent_channels": args.latent_channels,
+            "latent_size": args.latent_size,
+            "latent_shape": [args.latent_channels, args.latent_size, args.latent_size],
+            "hidden_channels": args.hidden_channels,
+            "channel_multipliers": args.channel_multipliers,
+            "mode": training_mode_name(args),
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -333,11 +365,11 @@ def log_training_info(
             "adam_beta1": args.adam_beta1,
             "adam_beta2": args.adam_beta2,
             "lr_schedule": args.lr_schedule,
-            "missing_ratio_range": args.missing_ratio_range,
-            "ssim_loss_weight": args.ssim_loss_weight,
+            "loss": "mse_plus_kl",
+            "kl_weight": args.kl_weight,
             "amp": True,
             "model": str(model),
-        }
+        },
     )
 
 
@@ -357,8 +389,7 @@ def save_training_checkpoint(
         "optimizer": optimizer.state_dict(),
         "lr_scheduler": lr_scheduler.state_dict(),
         "amp_scaler": scaler.state_dict(),
-        "model_arch": args.model_arch,
-        "model_config": MODEL_CONFIGS[args.model_arch],
+        "model_config": model.config.__dict__,
         "args": vars(args),
     }
     torch.save(checkpoint, checkpoint_path)
@@ -400,8 +431,8 @@ def main(args):
         sampler=str(train_sampler),
     )
 
-    logger.log_event("model_initializing", model_arch=args.model_arch)
-    model = build_model(args.model_arch, device)
+    logger.log_event("model_initializing")
+    model = build_model(args, device)
     model_without_ddp = model
 
     total_params, trainable_params, frozen_params = count_model_parameters(model_without_ddp)
@@ -457,10 +488,6 @@ def main(args):
     )
 
     scaler = AMPGradScaler(enabled=device.type == "cuda", device=device.type)
-    flow_path = CondOTProbPath()
-    ssim_metric = None
-    if args.ssim_loss_weight > 0:
-        ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
 
     logger.log_event("training_started")
     start_time = time.time()
@@ -475,8 +502,6 @@ def main(args):
             dataloader=train_loader,
             optimizer=optimizer,
             scaler=scaler,
-            flow_path=flow_path,
-            ssim_metric=ssim_metric,
             device=device,
             args=args,
             logger=logger,

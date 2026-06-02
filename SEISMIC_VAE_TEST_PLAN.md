@@ -194,7 +194,7 @@ total_loss =
 训练命令：
 
 ```bash
-python train_seismic_vae.py \
+python train_vae.py \
   --data_dir dataset_train_size256 \
   --input_size 256 \
   --latent_channels 4 \
@@ -233,7 +233,7 @@ Latent 形状：
 训练命令：
 
 ```bash
-python train_seismic_vae.py \
+python train_vae.py \
   --data_dir dataset_train_size256 \
   --input_size 256 \
   --latent_channels 4 \
@@ -272,7 +272,7 @@ Latent 形状：
 训练命令：
 
 ```bash
-python train_seismic_vae.py \
+python train_vae.py \
   --data_dir dataset_train_size256 \
   --input_size 256 \
   --latent_channels 4 \
@@ -313,7 +313,7 @@ Latent 形状：
 训练命令：
 
 ```bash
-python train_seismic_vae.py \
+python train_vae.py \
   --data_dir dataset_train_size256 \
   --input_size 256 \
   --latent_channels 8 \
@@ -349,7 +349,7 @@ Latent 形状：
 训练命令：
 
 ```bash
-python train_seismic_vae.py \
+python train_vae.py \
   --data_dir dataset_train_size256 \
   --input_size 256 \
   --latent_channels 8 \
@@ -395,15 +395,15 @@ log.txt
 
 重点查看 `[T]` 行：
 
-  - total loss；
-  - MSE loss；
-  - KL loss；
-  - MAE；
-  - RMSE；
-  - PSNR；
-  - learning rate；
-  - grad norm；
-  - CUDA memory usage。
+- total loss；
+- MSE loss；
+- KL loss；
+- MAE；
+- RMSE；
+- PSNR；
+- learning rate；
+- grad norm；
+- CUDA memory usage。
 
 ## 7. 评估指标
 
@@ -438,13 +438,13 @@ latent 统计
 
 ## 8. 结果表模板
 
-| 实验 | Latent | 压缩倍率 | 参数量 | MAE | PSNR | SSIM | Spectrum L1 | 备注 |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| E1 | 4x64x64 | 4x | - | - | - | - | - | 高质量上限 |
-| E2 | 4x32x32 | 8x | - | - | - | - | - | 推荐 baseline |
-| E3 | 4x16x16 | 16x | - | - | - | - | - | 强压缩 |
-| E4 | 8x32x32 | 8x | - | - | - | - | - | 容量增强 |
-| E5 | 8x16x16 | 16x | - | - | - | - | - | 容量/压缩折中 |
+| 实验 |  Latent | 压缩倍率 | 参数量 | MAE | PSNR | SSIM | Spectrum L1 | 备注          |
+|----|--------:|-----:|----:|----:|-----:|-----:|------------:|-------------|
+| E1 | 4x64x64 |   4x |   - |   - |    - |    - |           - | 高质量上限       |
+| E2 | 4x32x32 |   8x |   - |   - |    - |    - |           - | 推荐 baseline |
+| E3 | 4x16x16 |  16x |   - |   - |    - |    - |           - | 强压缩         |
+| E4 | 8x32x32 |   8x |   - |   - |    - |    - |           - | 容量增强        |
+| E5 | 8x16x16 |  16x |   - |   - |    - |    - |           - | 容量/压缩折中     |
 
 ## 9. 选择标准
 

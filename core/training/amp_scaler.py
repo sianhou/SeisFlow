@@ -41,13 +41,25 @@ class AMPGradScaler:
             create_graph=False,
             update_grad=True,
     ):
+        # 反向传播:
+        # self.enabled=True：说明启用 AMP，先把 loss 放大，再 backward
+        # self.enabled=False：普通 backward
         if self.enabled:
             self._scaler.scale(loss).backward(create_graph=create_graph)
         else:
             loss.backward(create_graph=create_graph)
+
+        # 是否更新参数:
+        # 在梯度累积时，不是每个 batch 都 optimizer.step()。比如：
+        # grad_accum_steps = 4时，前 3 个 batch 只 backward，不更新参数；第 4 个 batch 才更新。
+        # 所以：
+        #   update_grad=False：只 backward，累积梯度
+        #   update_grad=True：backward 后执行 optimizer step
         if update_grad:
             if clip_grad is not None:
                 assert parameters is not None
+                # 如果设置了梯度裁剪，就先把 AMP 放大的梯度还原回来：
+                # 这个函数会限制梯度范数不超过 clip_grad，同时返回裁剪前的梯度范数。
                 if self.enabled:
                     self._scaler.unscale_(
                         optimizer
