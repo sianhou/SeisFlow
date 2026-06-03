@@ -1,6 +1,7 @@
 import logging
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -397,6 +398,8 @@ class SimpleLogger2(RunLoggerBase):
             "current_working_directory": os.getcwd(),
         }
 
+        info.update(self._collect_hardware_info())
+
         if include_git:
             info.update(self._collect_git_info())
 
@@ -418,6 +421,202 @@ class SimpleLogger2(RunLoggerBase):
             return getuser()
         except Exception:
             return ""
+
+    @staticmethod
+    def _bytes_to_gib(value: int) -> float:
+        return value / 1024**3
+
+    @staticmethod
+    def _run_system_command(args: Sequence[str]) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                list(args),
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def _collect_hardware_info(self) -> Dict[str, Any]:
+        info: Dict[str, Any] = {
+            "cpu_model": self._collect_cpu_model(),
+            "cpu_physical_cores": self._collect_physical_cpu_cores(),
+            "cpu_logical_threads": os.cpu_count(),
+        }
+        info.update(self._collect_memory_info())
+        info.update(self._collect_disk_info())
+        info.update(self._collect_apple_info())
+        return info
+
+    def _collect_cpu_model(self) -> str:
+        system = platform.system()
+        if system == "Darwin":
+            return self._run_system_command(
+                ["sysctl", "-n", "machdep.cpu.brand_string"]
+            ) or platform.processor()
+        if system == "Linux":
+            try:
+                with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
+                    for line in cpuinfo:
+                        if line.lower().startswith("model name"):
+                            return line.split(":", 1)[1].strip()
+            except OSError:
+                pass
+        if system == "Windows":
+            return os.environ.get("PROCESSOR_IDENTIFIER", platform.processor())
+        return platform.processor()
+
+    def _collect_physical_cpu_cores(self) -> Optional[int]:
+        try:
+            import psutil
+
+            return psutil.cpu_count(logical=False)
+        except (ImportError, AttributeError):
+            pass
+
+        system = platform.system()
+        if system == "Darwin":
+            value = self._run_system_command(["sysctl", "-n", "hw.physicalcpu"])
+            return int(value) if value and value.isdigit() else None
+        if system == "Linux":
+            core_ids = set()
+            physical_id = "0"
+            core_id = None
+            try:
+                with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
+                    for line in [*cpuinfo, "\n"]:
+                        if line.startswith("physical id"):
+                            physical_id = line.split(":", 1)[1].strip()
+                        elif line.startswith("core id"):
+                            core_id = line.split(":", 1)[1].strip()
+                        elif not line.strip() and core_id is not None:
+                            core_ids.add((physical_id, core_id))
+                            core_id = None
+            except OSError:
+                return None
+            return len(core_ids) or None
+        return None
+
+    def _collect_memory_info(self) -> Dict[str, Any]:
+        try:
+            import psutil
+
+            memory = psutil.virtual_memory()
+            return {
+                "memory_total_gib": self._bytes_to_gib(memory.total),
+                "memory_used_gib": self._bytes_to_gib(memory.used),
+                "memory_available_gib": self._bytes_to_gib(memory.available),
+                "memory_percent_used": memory.percent,
+            }
+        except (ImportError, AttributeError):
+            pass
+
+        total = None
+        available = None
+        if platform.system() == "Linux":
+            values: Dict[str, int] = {}
+            try:
+                with open("/proc/meminfo", encoding="utf-8") as meminfo:
+                    for line in meminfo:
+                        key, value = line.split(":", 1)
+                        values[key] = int(value.strip().split()[0]) * 1024
+            except (OSError, ValueError):
+                values = {}
+            total = values.get("MemTotal")
+            available = values.get("MemAvailable")
+        elif platform.system() == "Darwin":
+            value = self._run_system_command(["sysctl", "-n", "hw.memsize"])
+            total = int(value) if value and value.isdigit() else None
+            vm_stat = self._run_system_command(["vm_stat"])
+            if vm_stat:
+                available = self._parse_macos_available_memory(vm_stat)
+
+        if total is None:
+            return {}
+        used = total - available if available is not None else None
+        info: Dict[str, Any] = {"memory_total_gib": self._bytes_to_gib(total)}
+        if used is not None:
+            info["memory_used_gib"] = self._bytes_to_gib(used)
+            info["memory_available_gib"] = self._bytes_to_gib(available)
+            info["memory_percent_used"] = used / total * 100
+        return info
+
+    @staticmethod
+    def _parse_macos_available_memory(vm_stat: str) -> Optional[int]:
+        lines = vm_stat.splitlines()
+        if not lines:
+            return None
+
+        page_size_match = re.search(r"page size of (\d+) bytes", lines[0])
+        if page_size_match is None:
+            return None
+        page_size = int(page_size_match.group(1))
+
+        available_page_names = {
+            "Pages free",
+            "Pages inactive",
+            "Pages speculative",
+            "Pages purgeable",
+        }
+        available_pages = 0
+        for line in lines[1:]:
+            if ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            if name not in available_page_names:
+                continue
+            page_count = value.strip().rstrip(".")
+            if page_count.isdigit():
+                available_pages += int(page_count)
+        return available_pages * page_size
+
+    def _collect_disk_info(self) -> Dict[str, Any]:
+        try:
+            disk = shutil.disk_usage(os.getcwd())
+        except OSError:
+            return {}
+        return {
+            "disk_path": os.getcwd(),
+            "disk_total_gib": self._bytes_to_gib(disk.total),
+            "disk_used_gib": self._bytes_to_gib(disk.used),
+            "disk_free_gib": self._bytes_to_gib(disk.free),
+            "disk_percent_used": disk.used / disk.total * 100 if disk.total else 0.0,
+        }
+
+    def _collect_apple_info(self) -> Dict[str, Any]:
+        if platform.system() != "Darwin":
+            return {}
+
+        machine = platform.machine()
+        info: Dict[str, Any] = {
+            "apple_silicon": machine in {"arm64", "aarch64"},
+            "apple_model": self._run_system_command(
+                ["sysctl", "-n", "hw.model"]
+            ),
+            "apple_chip": self._run_system_command(
+                ["sysctl", "-n", "machdep.cpu.brand_string"]
+            ),
+        }
+        memory_total = self._run_system_command(["sysctl", "-n", "hw.memsize"])
+        if memory_total and memory_total.isdigit():
+            info["apple_unified_memory_gib"] = self._bytes_to_gib(int(memory_total))
+        performance_cores = self._run_system_command(
+            ["sysctl", "-n", "hw.perflevel0.physicalcpu"]
+        )
+        efficiency_cores = self._run_system_command(
+            ["sysctl", "-n", "hw.perflevel1.physicalcpu"]
+        )
+        if performance_cores and performance_cores.isdigit():
+            info["apple_performance_cores"] = int(performance_cores)
+        if efficiency_cores and efficiency_cores.isdigit():
+            info["apple_efficiency_cores"] = int(efficiency_cores)
+        return info
 
     @staticmethod
     def _default_package_names(package_names: Optional[Sequence[str]]) -> Sequence[str]:
@@ -591,12 +790,23 @@ class SimpleLogger2(RunLoggerBase):
 
         info["gpu_count"] = cuda.device_count() if cuda else 0
         if info["cuda_available"]:
-            gpu_names = [
-                cuda.get_device_name(index)
-                for index in range(cuda.device_count())
-            ]
+            gpu_names = []
+            gpu_memory_total_gib = []
+            for index in range(cuda.device_count()):
+                name = cuda.get_device_name(index)
+                total_memory = cuda.get_device_properties(index).total_memory
+                total_memory_gib = total_memory / 1024**3
+                gpu_names.append(name)
+                gpu_memory_total_gib.append(f"{total_memory_gib:.6g}")
+                info[f"gpu_{index}_name"] = name
+                info[f"gpu_{index}_memory_total_gib"] = total_memory_gib
             info["gpu_names"] = ", ".join(gpu_names)
+            info["gpu_memory_total_gib"] = ", ".join(gpu_memory_total_gib)
             info["current_cuda_device"] = cuda.current_device()
+
+        mps = getattr(backends, "mps", None) if backends is not None else None
+        info["mps_built"] = bool(mps and mps.is_built())
+        info["mps_available"] = bool(mps and mps.is_available())
         return info
 
     def log_event(
