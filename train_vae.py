@@ -535,11 +535,16 @@ def main(args):
         total_time_sec=total_time,
         run_dir=str(checkpoint_dir),
     )
-    logger.close()
 
     if args.distributed:
+        logger.log_event("final_barrier_started", rank=args.rank, gpu=args.gpu)
         distributed_mode.barrier([args.gpu])
+        logger.log_event("final_barrier_finished", rank=args.rank, gpu=args.gpu)
+        logger.log_event("distributed_destroy_started", rank=args.rank)
         distributed_mode.destroy()
+        logger.log_event("distributed_destroy_finished", rank=args.rank)
+
+    logger.close()
 
 
 if __name__ == "__main__":
