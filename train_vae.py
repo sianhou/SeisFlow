@@ -30,6 +30,11 @@ def build_parser():
         help="Directory used for logs and checkpoints.",
     )
     parser.add_argument(
+        "--ckpt",
+        default=None,
+        help="Optional checkpoint PTH file used to resume training in a new run directory.",
+    )
+    parser.add_argument(
         "--batch_size",
         default=16,
         type=int,
@@ -396,6 +401,39 @@ def save_training_checkpoint(
     return checkpoint_path
 
 
+def load_training_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        lr_scheduler,
+        scaler,
+        device,
+):
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+    try:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+
+    if "lr_scheduler" in checkpoint and checkpoint["lr_scheduler"]:
+        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+
+    if "amp_scaler" in checkpoint and checkpoint["amp_scaler"]:
+        scaler.load_state_dict(checkpoint["amp_scaler"])
+
+    return int(checkpoint.get("epoch", 0)), checkpoint
+
+
 def main(args):
     distributed_mode.init_distributed_mode(args)
 
@@ -489,11 +527,30 @@ def main(args):
 
     scaler = AMPGradScaler(enabled=device.type == "cuda", device=device.type)
 
+    start_epoch = 0
+    if args.ckpt:
+        logger.log_event("checkpoint_loading", path=args.ckpt)
+        start_epoch, checkpoint = load_training_checkpoint(
+            checkpoint_path=args.ckpt,
+            model=model_without_ddp,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            scaler=scaler,
+            device=device,
+        )
+        logger.log_event(
+            "checkpoint_loaded",
+            path=args.ckpt,
+            checkpoint_epoch=start_epoch,
+            start_epoch=start_epoch + 1,
+            checkpoint_model_config=checkpoint.get("model_config", ""),
+        )
+
     logger.log_event("training_started")
     start_time = time.time()
     checkpoint_dir = logger.run_dir
 
-    for epoch in range(args.num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         if args.distributed:
             train_loader.sampler.set_epoch(epoch)
 

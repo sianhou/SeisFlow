@@ -2,15 +2,8 @@ import argparse
 import csv
 import json
 import math
-import os
 import random
 from pathlib import Path
-
-PROJECT_DIR = Path(__file__).resolve().parent
-CACHE_DIR = PROJECT_DIR / ".matplotlib_cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", str(CACHE_DIR))
-os.environ.setdefault("XDG_CACHE_HOME", str(CACHE_DIR))
 
 import matplotlib
 
@@ -19,51 +12,81 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torchmetrics.functional.image import structural_similarity_index_measure
 
 from core.dataset import SegyDataset
+from core.transforms import AbsNormalize, Clip
 from models.seismic_vae import SeismicSpatialVAE
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Validate a Seismic VAE checkpoint on random SEG-Y shot crops."
+        description="Validate a seismic spatial VAE checkpoint on random SEG-Y shot crops.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--checkpoint",
+        "--ckpt",
         required=True,
-        help="Path to a seismic_vae_epoch_*.pth checkpoint.",
+        help="Path to a VAE checkpoint PTH file saved by train_vae.py.",
     )
     parser.add_argument(
         "--segy",
         required=True,
         help="SEG-Y file used for random shot crop validation.",
     )
-    parser.add_argument("--batch_size", default=64, type=int)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--seed", default=0, type=int)
     parser.add_argument(
         "--output_dir",
         default=None,
-        help="Output directory. Default: <checkpoint_parent>/valid_<checkpoint_stem>.",
+        help="Directory used for validation outputs. Default: <ckpt_parent>/valid_<ckpt_stem>.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        default=64,
+        type=int,
+        help="Number of random shot crops to validate.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="Validation device, such as cuda, cuda:0, cpu, or mps.",
+    )
+    parser.add_argument(
+        "--seed",
+        default=0,
+        type=int,
+        help="Random seed used for shot sampling and crop selection.",
     )
     parser.add_argument(
         "--slice",
         nargs=2,
         type=int,
         default=[0, 1501],
+        metavar=("START", "END"),
         help="Optional sample-axis slice before random crop. Use 0 0 to disable.",
     )
     parser.add_argument(
         "--num_workers",
         default=0,
         type=int,
-        help="Reserved for future dataloader validation. Current script samples directly.",
+        help="Reserved for future DataLoader validation. Current script samples directly.",
     )
     parser.add_argument(
         "--missing_ratio",
         default=0.0,
         type=float,
         help="Row missing ratio. Use 0 to disable, or a value in (0, 1) to enable.",
+    )
+    parser.add_argument(
+        "--clip_vmin",
+        default=None,
+        type=float,
+        help="Optional lower clipping bound applied before normalization.",
+    )
+    parser.add_argument(
+        "--clip_vmax",
+        default=None,
+        type=float,
+        help="Optional upper clipping bound applied before normalization.",
     )
     return parser
 
@@ -133,72 +156,23 @@ def random_crop(shot, crop_size):
 def compute_metrics(recon, target):
     diff = recon - target
     mse = float(np.mean(diff ** 2))
-    l1_loss = float(np.mean(np.abs(diff)))
-    rmse = math.sqrt(max(mse, 1e-12))
-    psnr_range = max(float(np.max(target) - np.min(target)), 1e-12)
-    psnr = 20.0 * math.log10(psnr_range) - 10.0 * math.log10(max(mse, 1e-12))
-    ssim = compute_ssim(recon, target, data_range=psnr_range)
-    frequency_l1 = compute_frequency_l1(recon, target, log_amplitude=False)
-    log_frequency_l1 = compute_frequency_l1(recon, target, log_amplitude=True)
-    gradient_l1 = compute_gradient_l1(recon, target)
+    rmse = math.sqrt(mse)
+    data_range = max(float(np.max(target) - np.min(target)), 1e-12)
+    psnr = 20.0 * math.log10(data_range) - 10.0 * math.log10(max(mse, 1e-12))
+    recon_tensor = torch.from_numpy(recon).float().unsqueeze(0).unsqueeze(0)
+    target_tensor = torch.from_numpy(target).float().unsqueeze(0).unsqueeze(0)
+    ssim = float(
+        structural_similarity_index_measure(
+            recon_tensor,
+            target_tensor,
+            data_range=data_range,
+        )
+    )
     return {
-        "mse": mse,
-        "mae": l1_loss,
-        "l1_loss": l1_loss,
         "rmse": rmse,
         "psnr": psnr,
         "ssim": ssim,
-        "ssim_loss": 1.0 - ssim,
-        "frequency_l1": frequency_l1,
-        "log_frequency_l1": log_frequency_l1,
-        "gradient_l1": gradient_l1,
     }
-
-
-def compute_ssim(recon, target, data_range):
-    recon = recon.astype(np.float64)
-    target = target.astype(np.float64)
-    c1 = (0.01 * data_range) ** 2
-    c2 = (0.03 * data_range) ** 2
-
-    mu_x = float(np.mean(recon))
-    mu_y = float(np.mean(target))
-    var_x = float(np.var(recon))
-    var_y = float(np.var(target))
-    cov_xy = float(np.mean((recon - mu_x) * (target - mu_y)))
-
-    numerator = (2.0 * mu_x * mu_y + c1) * (2.0 * cov_xy + c2)
-    denominator = (mu_x**2 + mu_y**2 + c1) * (var_x + var_y + c2)
-    if abs(denominator) < 1e-12:
-        return 1.0 if np.allclose(recon, target) else 0.0
-    return float(numerator / denominator)
-
-
-def compute_frequency_l1(recon, target, log_amplitude=False):
-    recon_amp = np.abs(np.fft.rfft2(recon))
-    target_amp = np.abs(np.fft.rfft2(target))
-    if log_amplitude:
-        recon_amp = np.log1p(recon_amp)
-        target_amp = np.log1p(target_amp)
-    return float(np.mean(np.abs(recon_amp - target_amp)))
-
-
-def compute_gradient_l1(recon, target):
-    recon_grad_h = np.diff(recon, axis=0)
-    target_grad_h = np.diff(target, axis=0)
-    recon_grad_w = np.diff(recon, axis=1)
-    target_grad_w = np.diff(target, axis=1)
-    grad_h_l1 = np.mean(np.abs(recon_grad_h - target_grad_h))
-    grad_w_l1 = np.mean(np.abs(recon_grad_w - target_grad_w))
-    return float(0.5 * (grad_h_l1 + grad_w_l1))
-
-
-def normalize_batch_abs(raw_batch):
-    scales = np.max(np.abs(raw_batch), axis=(1, 2)).astype(np.float32)
-    scales = np.maximum(scales, 1e-12)
-    normalized = raw_batch / scales[:, None, None]
-    normalized = np.clip(normalized, -1.0, 1.0).astype(np.float32)
-    return normalized, scales
 
 
 def random_row_mask(shape, missing_ratio):
@@ -230,7 +204,7 @@ def plot_sample(raw, recon, diff, metrics, output_path, title):
         fig.colorbar(im, ax=axis, shrink=0.8)
 
     fig.suptitle(
-        f"{title} | mse={metrics['mse']:.6g}, mae={metrics['mae']:.6g}, "
+        f"{title} | rmse={metrics['rmse']:.6g}, "
         f"psnr={metrics['psnr']:.3f}, ssim={metrics['ssim']:.4f}",
         fontsize=10,
     )
@@ -326,7 +300,7 @@ def plot_latent_batch(latent_batch, output_path, title):
 def validate(args):
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    checkpoint_path = Path(args.checkpoint)
+    checkpoint_path = Path(args.ckpt)
     default_output_name = f"valid_{checkpoint_path.stem}"
     if args.missing_ratio > 0.0:
         ratio_tag = f"{args.missing_ratio:.4g}".replace(".", "p")
@@ -345,6 +319,12 @@ def validate(args):
         raise ValueError("--batch_size must be positive.")
     if args.missing_ratio < 0.0 or args.missing_ratio >= 1.0:
         raise ValueError("--missing_ratio must be 0 or in (0, 1).")
+    if (
+        args.clip_vmin is not None
+        and args.clip_vmax is not None
+        and args.clip_vmin > args.clip_vmax
+    ):
+        raise ValueError("--clip_vmin must be less than or equal to --clip_vmax.")
     if len(dataset) == 0:
         raise ValueError(f"No shots found in {args.segy}.")
 
@@ -361,7 +341,6 @@ def validate(args):
         crop, top, left, effective_shape = random_crop(shot, crop_size)
         if args.missing_ratio > 0.0:
             mask = random_row_mask(crop.shape, args.missing_ratio)
-            crop = crop * mask
         else:
             mask = np.ones_like(crop, dtype=np.float32)
         raw_patches.append(crop)
@@ -380,10 +359,23 @@ def validate(args):
             }
         )
 
-    raw_batch = np.stack(raw_patches, axis=0)
+    raw_tensor = torch.from_numpy(np.stack(raw_patches, axis=0)).float().unsqueeze(1)
+    if args.clip_vmin is not None or args.clip_vmax is not None:
+        raw_tensor = Clip(
+            vmin=args.clip_vmin,
+            vmax=args.clip_vmax,
+            per_channel=True,
+        )(raw_tensor)
+
     missing_mask_batch = np.stack(missing_masks, axis=0)
-    input_batch, norm_scales = normalize_batch_abs(raw_batch)
-    input_tensor = torch.from_numpy(input_batch).float().unsqueeze(1).to(device)
+    missing_mask_tensor = torch.from_numpy(missing_mask_batch).float().unsqueeze(1)
+    raw_tensor = raw_tensor * missing_mask_tensor
+
+    input_tensor, norm_scale_tensor = AbsNormalize(per_channel=True).run(raw_tensor)
+    raw_batch = raw_tensor.squeeze(1).numpy()
+    input_batch = input_tensor.squeeze(1).numpy()
+    norm_scales = norm_scale_tensor[:, 0, 0, 0].numpy()
+    input_tensor = input_tensor.to(device)
 
     with torch.no_grad():
         outputs = model(input_tensor)
@@ -393,6 +385,7 @@ def validate(args):
         latent_z_batch = outputs["z"].detach().cpu().numpy()
 
     recon_batch = recon_normalized_batch * norm_scales[:, None, None]
+    recon_batch = recon_batch * missing_mask_batch
     diff_batch = recon_batch - raw_batch
     metrics_rows = []
     for idx in range(sample_count):
@@ -426,20 +419,21 @@ def validate(args):
         "logvar latent channels",
     )
 
-    np.savez_compressed(
-        output_dir / "valid_samples.npz",
-        raw=raw_batch,
-        missing_mask=missing_mask_batch,
-        input_normalized=input_batch,
-        recon_normalized=recon_normalized_batch,
-        recon=recon_batch,
-        diff=diff_batch,
-        latent_mu=latent_mu_batch,
-        latent_logvar=latent_logvar_batch,
-        latent_z=latent_z_batch,
-        norm_scales=norm_scales,
-        shot_indices=np.array(shot_indices, dtype=np.int64),
-    )
+    arrays_to_save = {
+        "raw": raw_batch,
+        "missing_mask": missing_mask_batch,
+        "input_normalized": input_batch,
+        "recon_normalized": recon_normalized_batch,
+        "recon": recon_batch,
+        "diff": diff_batch,
+        "latent_mu": latent_mu_batch,
+        "latent_logvar": latent_logvar_batch,
+        "latent_z": latent_z_batch,
+        "norm_scales": norm_scales,
+        "shot_indices": np.array(shot_indices, dtype=np.int64),
+    }
+    for name, array in arrays_to_save.items():
+        np.save(output_dir / f"{name}.npy", array)
 
     metrics_path = output_dir / "metrics.csv"
     fieldnames = [
@@ -453,16 +447,9 @@ def validate(args):
         "missing_enabled",
         "missing_ratio",
         "norm_scale",
-        "mse",
-        "mae",
-        "l1_loss",
         "rmse",
         "psnr",
         "ssim",
-        "ssim_loss",
-        "frequency_l1",
-        "log_frequency_l1",
-        "gradient_l1",
     ]
     with metrics_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -479,32 +466,24 @@ def validate(args):
         "latent_channels": int(latent_mu_batch.shape[1]),
         "latent_size": int(latent_mu_batch.shape[-1]),
         "input_normalization": "per_patch_abs",
+        "clip_vmin": args.clip_vmin,
+        "clip_vmax": args.clip_vmax,
         "missing_enabled": args.missing_ratio > 0.0,
         "missing_ratio": args.missing_ratio,
         "inverse_normalize_reconstruction": True,
         "metric_domain": "raw_amplitude",
         "psnr_range": "target_max_minus_min",
         "slice": args.slice,
-        "mean_mse": float(np.mean([row["mse"] for row in metrics_rows])),
-        "mean_mae": float(np.mean([row["mae"] for row in metrics_rows])),
-        "mean_l1_loss": float(np.mean([row["l1_loss"] for row in metrics_rows])),
         "mean_rmse": float(np.mean([row["rmse"] for row in metrics_rows])),
         "mean_psnr": float(np.mean([row["psnr"] for row in metrics_rows])),
         "mean_ssim": float(np.mean([row["ssim"] for row in metrics_rows])),
-        "mean_ssim_loss": float(np.mean([row["ssim_loss"] for row in metrics_rows])),
-        "mean_frequency_l1": float(np.mean([row["frequency_l1"] for row in metrics_rows])),
-        "mean_log_frequency_l1": float(
-            np.mean([row["log_frequency_l1"] for row in metrics_rows])
-        ),
-        "mean_gradient_l1": float(np.mean([row["gradient_l1"] for row in metrics_rows])),
     }
     with (output_dir / "summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     print(f"saved: {output_dir}")
     print(
-        f"mean_mse={summary['mean_mse']:.6g} "
-        f"mean_mae={summary['mean_mae']:.6g} "
+        f"mean_rmse={summary['mean_rmse']:.6g} "
         f"mean_psnr={summary['mean_psnr']:.3f} "
         f"mean_ssim={summary['mean_ssim']:.4f}"
     )
