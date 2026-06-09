@@ -18,5 +18,6 @@ for CHECKPOINT in "${RUN_DIR}"/checkpoint_epoch_*.pth; do
     --batch_size "${BATCH_SIZE}" \
     --device "${DEVICE}" \
     --missing_ratio "${MISSING_RATIO}" \
+    --data_range 4 \
     --clip_vmin -2 --clip_vmax 2
 done

@@ -88,6 +88,15 @@ def build_parser():
         type=float,
         help="Optional upper clipping bound applied before normalization.",
     )
+    parser.add_argument(
+        "--data_range",
+        default=0.0,
+        type=float,
+        help=(
+            "Data range used by PSNR and SSIM. Values <= 0 use each target "
+            "patch's max-minus-min range; values > 0 use the specified fixed range."
+        ),
+    )
     return parser
 
 
@@ -153,11 +162,14 @@ def random_crop(shot, crop_size):
     return crop.astype(np.float32), top, left, shot.shape
 
 
-def compute_metrics(recon, target):
+def compute_metrics(recon, target, configured_data_range):
     diff = recon - target
     mse = float(np.mean(diff ** 2))
     rmse = math.sqrt(mse)
-    data_range = max(float(np.max(target) - np.min(target)), 1e-12)
+    if configured_data_range > 0.0:
+        data_range = configured_data_range
+    else:
+        data_range = max(float(np.max(target) - np.min(target)), 1e-12)
     psnr = 20.0 * math.log10(data_range) - 10.0 * math.log10(max(mse, 1e-12))
     recon_tensor = torch.from_numpy(recon).float().unsqueeze(0).unsqueeze(0)
     target_tensor = torch.from_numpy(target).float().unsqueeze(0).unsqueeze(0)
@@ -320,9 +332,9 @@ def validate(args):
     if args.missing_ratio < 0.0 or args.missing_ratio >= 1.0:
         raise ValueError("--missing_ratio must be 0 or in (0, 1).")
     if (
-        args.clip_vmin is not None
-        and args.clip_vmax is not None
-        and args.clip_vmin > args.clip_vmax
+            args.clip_vmin is not None
+            and args.clip_vmax is not None
+            and args.clip_vmin > args.clip_vmax
     ):
         raise ValueError("--clip_vmin must be less than or equal to --clip_vmax.")
     if len(dataset) == 0:
@@ -389,7 +401,11 @@ def validate(args):
     diff_batch = recon_batch - raw_batch
     metrics_rows = []
     for idx in range(sample_count):
-        metrics = compute_metrics(recon_batch[idx], raw_batch[idx])
+        metrics = compute_metrics(
+            recon_batch[idx],
+            raw_batch[idx],
+            configured_data_range=args.data_range,
+        )
         row = {**metadata[idx], "norm_scale": float(norm_scales[idx]), **metrics}
         metrics_rows.append(row)
         plot_sample(
@@ -472,7 +488,8 @@ def validate(args):
         "missing_ratio": args.missing_ratio,
         "inverse_normalize_reconstruction": True,
         "metric_domain": "raw_amplitude",
-        "psnr_range": "target_max_minus_min",
+        "data_range": args.data_range,
+        "data_range_mode": "fixed" if args.data_range > 0.0 else "target_max_minus_min",
         "slice": args.slice,
         "mean_rmse": float(np.mean([row["rmse"] for row in metrics_rows])),
         "mean_psnr": float(np.mean([row["psnr"] for row in metrics_rows])),
