@@ -1,72 +1,48 @@
 import argparse
 import gc
+import math
 import os
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from torchmetrics.image import StructuralSimilarityIndexMeasure
+from diffusers.models import AutoencoderKL
 
 from core.dataset import PatchDataset
 from core.logging.logger import DistributedSimpleLogger2
-from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
-from flow_matching.path import CondOTProbPath
-from models.dit import DiT_models
-from models.seismic_vae import SeismicSpatialVAE
 from training import distributed_mode
 
-DIT_ARCHITECTURES = {
-    "DiT-S/4": DiT_models["DiT-S/4"],
-    "DiT-B/4": DiT_models["DiT-B/4"],
-    "DiT-L/4": DiT_models["DiT-L/4"],
-    "DiT-XL/4": DiT_models["DiT-XL/4"],
-}
 
-DIT_MODEL_CONFIG = {
-    "in_channels": 9,
-    "out_channels": 4,
-    "input_size": 32,
-    "num_classes": None,
-    "class_dropout_prob": 0.1,
-}
+class SeismicAutoencoderKL(AutoencoderKL):
+    def forward(self, sample, sample_posterior=True, return_dict=True, generator=None):
+        posterior = self.encode(sample).latent_dist
+        if sample_posterior:
+            latents = posterior.sample(generator=generator)
+        else:
+            latents = posterior.mode()
+        reconstruction = self.decode(latents).sample
 
-VAE_BUILDERS = {
-    "vae": SeismicSpatialVAE,
-}
-
-
-def build_model(model_arch, device=None):
-    model = DIT_ARCHITECTURES[model_arch](**DIT_MODEL_CONFIG)
-    if device is not None:
-        model = model.to(device)
-    return model
-
-
-def build_vae(vae_arch, config, device=None):
-    vae_class = VAE_BUILDERS[vae_arch]
-    vae = vae_class.from_config(config)
-    if device is not None:
-        vae = vae.to(device)
-    return vae
+        outputs = {
+            "recon": reconstruction,
+            "mean": posterior.mean,
+            "logvar": posterior.logvar,
+        }
+        if return_dict:
+            return outputs
+        return tuple(outputs.values())
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description=(
-            "Train a conditional flow-matching model for seismic patch reconstruction with random row masking."
-        ),
+        description="Train a Diffusers AutoencoderKL on single-channel seismic patch NPY files.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--train_data_dir",
         default="./train_dataset",
-        help=(
-            "Directory containing training patch NPY files. If using a VAE, "
-            "patch values should be normalized to [-1, 1]."
-        ),
+        help="Directory containing training patch NPY files normalized to [-1, 1].",
     )
     parser.add_argument(
         "--output_dir",
@@ -74,25 +50,13 @@ def build_parser():
         help="Directory used for logs and checkpoints.",
     )
     parser.add_argument(
-        "--model_arch",
-        choices=sorted(DIT_ARCHITECTURES.keys()),
-        default="DiT-S/4",
-        help="Model architecture to train.",
-    )
-    parser.add_argument(
-        "--vae_arch",
-        choices=sorted(VAE_BUILDERS.keys()),
-        default="vae",
-        help="VAE architecture used to encode and decode seismic patches.",
-    )
-    parser.add_argument(
-        "--vae_ckpt",
-        required=True,
-        help="VAE checkpoint PTH file saved by train_vae.py.",
+        "--ckpt",
+        default=None,
+        help="Optional checkpoint PTH file used to resume training in a new run directory.",
     )
     parser.add_argument(
         "--batch_size",
-        default=32,
+        default=16,
         type=int,
         help="Mini-batch size per process.",
     )
@@ -104,7 +68,7 @@ def build_parser():
     )
     parser.add_argument(
         "--num_epochs",
-        default=1000,
+        default=100,
         type=int,
         help="Total number of training epochs.",
     )
@@ -121,20 +85,6 @@ def build_parser():
         help="Learning-rate schedule to use during training.",
     )
     parser.add_argument(
-        "--missing_ratio_range",
-        nargs=2,
-        type=float,
-        default=[0.3, 0.7],
-        metavar=("MIN", "MAX"),
-        help="Range of random missing ratios sampled per batch.",
-    )
-    parser.add_argument(
-        "--ssim_loss_weight",
-        default=0.0,
-        type=float,
-        help="Weight for optional SSIM reconstruction loss. Set 0 to disable.",
-    )
-    parser.add_argument(
         "--num_workers",
         default=4,
         type=int,
@@ -147,7 +97,7 @@ def build_parser():
     )
     parser.add_argument(
         "--save_every_epochs",
-        default=50,
+        default=10,
         type=int,
         help="Save a checkpoint every N epochs.",
     )
@@ -158,9 +108,8 @@ def build_parser():
     )
     parser.add_argument(
         "--log_console",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Print SimpleLogger2 output to stdout.",
+        action="store_true",
+        help="Also print SimpleLogger2 output to stdout.",
     )
     parser.add_argument(
         "--seed",
@@ -170,7 +119,7 @@ def build_parser():
     )
     parser.add_argument(
         "--device",
-        default="cpu",
+        default="cuda",
         help="Training device, such as cuda, cuda:0, cpu, or mps.",
     )
     parser.add_argument(
@@ -184,6 +133,59 @@ def build_parser():
         type=float,
         default=0.95,
         help="Second beta coefficient for AdamW.",
+    )
+    parser.add_argument(
+        "--input_size",
+        default=256,
+        choices=[256, 512],
+        type=int,
+        help=(
+            "Input patch height and width. Supports 256x256 and 512x512 "
+            "inputs with 32x32 or 64x64 spatial latents."
+        ),
+    )
+    parser.add_argument(
+        "--input_channels",
+        default=1,
+        type=int,
+        help="Number of input patch channels.",
+    )
+    parser.add_argument(
+        "--latent_channels",
+        default=4,
+        type=int,
+        help="Latent channel count for [B,C,latent_size,latent_size].",
+    )
+    parser.add_argument(
+        "--latent_size",
+        default=64,
+        choices=[32, 64],
+        type=int,
+        help="Spatial latent size. Supported values are 32 and 64.",
+    )
+    parser.add_argument(
+        "--hidden_channels",
+        default=32,
+        type=int,
+        help="Base hidden channel count for the VAE encoder and decoder.",
+    )
+    parser.add_argument(
+        "--channel_multipliers",
+        nargs="*",
+        type=int,
+        default=None,
+        help="Optional encoder/decoder channel multipliers. Defaults to powers of two.",
+    )
+    parser.add_argument(
+        "--autoencoder",
+        action="store_true",
+        help="Disable latent sampling and use z=mu.",
+    )
+    parser.add_argument(
+        "--kl_weight",
+        default=0.0,
+        type=float,
+        help="Weight for optional KL regularization. Set 0 to disable.",
     )
     parser.add_argument(
         "--dist_on_itp",
@@ -202,52 +204,6 @@ def build_parser():
         help="Number of distributed processes, usually provided by torchrun.",
     )
     return parser
-
-
-def resolve_device(device_name):
-    requested_device = torch.device(device_name)
-    if requested_device.type == "cuda" and not torch.cuda.is_available():
-        return torch.device("cpu")
-    if requested_device.type == "mps":
-        mps_backend = getattr(torch.backends, "mps", None)
-        if mps_backend is None or not mps_backend.is_available():
-            return torch.device("cpu")
-    return requested_device
-
-
-def load_vae(args, device):
-    checkpoint_path = Path(args.vae_ckpt)
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"VAE checkpoint file not found: {checkpoint_path}")
-
-    try:
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location="cpu",
-            weights_only=False,
-        )
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
-    config = checkpoint.get("model_config")
-    if config is None:
-        checkpoint_args = checkpoint.get("args", {})
-        config = {
-            "input_channels": checkpoint_args.get("input_channels", 1),
-            "output_channels": 1,
-            "latent_channels": checkpoint_args.get("latent_channels", 4),
-            "input_size": checkpoint_args.get("input_size", 256),
-            "latent_size": checkpoint_args.get("latent_size", 32),
-            "hidden_channels": checkpoint_args.get("hidden_channels", 32),
-            "channel_multipliers": checkpoint_args.get("channel_multipliers"),
-            "use_vae": not checkpoint_args.get("autoencoder", False),
-        }
-
-    vae = build_vae(args.vae_arch, config, device)
-    vae.load_state_dict(checkpoint["model"])
-    vae.eval()
-    vae.requires_grad_(False)
-    return vae, checkpoint, config
 
 
 def build_dataloader(args):
@@ -272,14 +228,80 @@ def build_dataloader(args):
     return dataset, sampler, dataloader
 
 
+def build_model(args, device):
+    compression = args.input_size // args.latent_size
+    if (
+            args.input_size % args.latent_size != 0
+            or compression < 1
+            or compression & (compression - 1) != 0
+    ):
+        raise ValueError("input_size / latent_size must be a positive power of two.")
+
+    num_blocks = int(math.log2(compression)) + 1
+    if args.channel_multipliers:
+        channel_multipliers = tuple(args.channel_multipliers)
+        if len(channel_multipliers) != num_blocks:
+            raise ValueError(
+                "channel_multipliers length must equal "
+                "log2(input_size / latent_size) + 1."
+            )
+    else:
+        channel_multipliers = tuple(min(2 ** idx, 8) for idx in range(num_blocks))
+
+    block_out_channels = tuple(
+        args.hidden_channels * multiplier for multiplier in channel_multipliers
+    )
+    down_block_types = ("DownEncoderBlock2D",) * num_blocks
+    up_block_types = ("UpDecoderBlock2D",) * num_blocks
+
+    model = SeismicAutoencoderKL(
+        in_channels=args.input_channels,
+        out_channels=1,
+        down_block_types=down_block_types,
+        up_block_types=up_block_types,
+        block_out_channels=block_out_channels,
+        layers_per_block=1,
+        act_fn="silu",
+        latent_channels=args.latent_channels,
+        norm_num_groups=32,
+        sample_size=args.input_size,
+        scaling_factor=1.0,
+        force_upcast=True,
+    ).to(device)
+    return model
+
+
+def compute_loss(outputs, clean_images, args):
+    mse = F.mse_loss(outputs["recon"], clean_images)
+    kl = -0.5 * torch.mean(
+        1.0
+        + outputs["logvar"]
+        - outputs["mean"].pow(2)
+        - outputs["logvar"].exp()
+    )
+    total = mse + args.kl_weight * kl
+    return {
+        "mse": mse,
+        "kl": kl,
+        "total": total,
+    }
+
+
+def training_mode_name(args):
+    if args.autoencoder and args.kl_weight > 0:
+        return "autoencoder_kl_regularized"
+    if args.autoencoder:
+        return "autoencoder"
+    if args.kl_weight > 0:
+        return "weak_kl_vae"
+    return "sampled_vae_no_kl"
+
+
 def train_one_epoch(
         model,
-        vae,
         dataloader,
         optimizer,
         scaler,
-        flow_path,
-        ssim_metric,
         device,
         args,
         logger,
@@ -289,8 +311,8 @@ def train_one_epoch(
     model.train(True)
 
     running_total_loss = 0.0
-    running_velocity_loss = 0.0
-    running_ssim_loss = 0.0
+    running_mse_loss = 0.0
+    running_kl_loss = 0.0
     running_steps = 0
     epoch_total_loss = 0.0
     epoch_steps = 0
@@ -300,79 +322,42 @@ def train_one_epoch(
         if step % args.grad_accum_steps == 0:
             optimizer.zero_grad()
             running_total_loss = 0.0
-            running_velocity_loss = 0.0
-            running_ssim_loss = 0.0
+            running_mse_loss = 0.0
+            running_kl_loss = 0.0
             running_steps = 0
 
         clean_images = batch.to(device, non_blocking=True)
-        if clean_images.shape[1] != 1:
+        if clean_images.shape[1] != args.input_channels:
             raise ValueError(
-                "train4_with_vae.py expects single-channel patches, "
-                f"got shape {tuple(clean_images.shape)}."
+                "train_seismic_vae.py expected "
+                f"{args.input_channels} input channels, got {clean_images.shape[1]}."
             )
-        mask_ratio = np.random.uniform(*args.missing_ratio_range)
-        observed_mask = generate_random_row_mask(x=clean_images, missing_ratio=mask_ratio)
-        masked_images = observed_mask * clean_images
-
-        with torch.no_grad():
-            clean_latents, _ = vae.encode(clean_images)
-            masked_latents, _ = vae.encode(masked_images)
-            latent_mask = F.adaptive_avg_pool2d(observed_mask, output_size=(32, 32))
-
-        expected_latent_shape = (4, 32, 32)
-        if clean_latents.shape[1:] != expected_latent_shape:
+        if clean_images.shape[-2:] != (args.input_size, args.input_size):
             raise ValueError(
-                "Expected clean VAE latents with shape "
-                f"[B, {expected_latent_shape[0]}, {expected_latent_shape[1]}, "
-                f"{expected_latent_shape[2]}], got {tuple(clean_latents.shape)}."
+                "train_seismic_vae.py expected patches with shape "
+                f"{args.input_size}x{args.input_size}, "
+                f"got {tuple(clean_images.shape[-2:])}."
             )
-        if masked_latents.shape != clean_latents.shape:
-            raise ValueError(
-                "Clean and masked VAE latents must have identical shapes, got "
-                f"{tuple(clean_latents.shape)} and {tuple(masked_latents.shape)}."
-            )
-
-        conditioning = torch.cat((masked_latents, latent_mask), dim=1)
-
-        noise = torch.randn_like(clean_latents)
-        timesteps = torch.rand(clean_latents.shape[0], device=device)
-        flow_sample = flow_path.sample(t=timesteps, x_0=noise, x_1=clean_latents)
-        noisy_latents = flow_sample.x_t
-        target_velocity = flow_sample.dx_t
 
         with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
-            predicted_velocity = model(
-                noisy_latents,
-                timesteps,
-                extra={"concat_conditioning": conditioning},
+            outputs = model(
+                clean_images,
+                sample_posterior=not args.autoencoder,
             )
-            velocity_loss = F.mse_loss(predicted_velocity, target_velocity)
+            losses = compute_loss(outputs, clean_images, args)
 
-            total_loss = velocity_loss
-            ssim_loss = torch.zeros((), device=device)
-            if args.ssim_loss_weight > 0:
-                timesteps_reshaped = timesteps.view(-1, 1, 1, 1)
-                predicted_latents = (
-                        noisy_latents
-                        + (1.0 - timesteps_reshaped) * predicted_velocity
-                )
-                ssim_score = ssim_metric(predicted_latents, clean_latents)
-                ssim_loss = 1.0 - ssim_score
-                total_loss = total_loss + args.ssim_loss_weight * ssim_loss
-
-        total_loss_value = float(total_loss.detach().cpu())
-        velocity_loss_value = float(velocity_loss.detach().cpu())
+        total_loss_value = float(losses["total"].detach().cpu())
+        mse_loss_value = float(losses["mse"].detach().cpu())
+        kl_loss_value = float(losses["kl"].detach().cpu())
         running_total_loss += total_loss_value
-        running_velocity_loss += velocity_loss_value
+        running_mse_loss += mse_loss_value
+        running_kl_loss += kl_loss_value
         running_steps += 1
-        if args.ssim_loss_weight > 0:
-            running_ssim_loss += float(ssim_loss.detach().cpu())
         epoch_total_loss += total_loss_value
         epoch_steps += 1
 
-        loss = total_loss / args.grad_accum_steps
+        loss = losses["total"] / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
-        step_start_time = time.time()
         scaler(
             loss,
             optimizer,
@@ -380,30 +365,24 @@ def train_one_epoch(
             update_grad=should_step,
         )
 
-        learning_rate = optimizer.param_groups[0]["lr"]
-        train_fields = {
-            "epoch": epoch + 1,
-            "step": step + 1,
-            "total_steps": total_steps,
-            "batch_size": int(clean_latents.shape[0]),
-            "loss": total_loss_value,
-            "running_loss": running_total_loss / max(running_steps, 1),
-            "velocity_loss": velocity_loss_value,
-            "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
-            "lr": learning_rate,
-            "mask_ratio": float(mask_ratio),
-            "optimizer_step": int(should_step),
-            "step_time_sec": time.time() - step_start_time,
-        }
-        if args.ssim_loss_weight > 0:
-            train_fields.update(
-                {
-                    "ssim_loss": float(ssim_loss.detach().cpu()),
-                    "running_ssim_loss": running_ssim_loss / max(running_steps, 1),
-                    "ssim_loss_weight": args.ssim_loss_weight,
-                }
-            )
-        logger.log_train(**train_fields)
+        if should_step:
+            optimizer.zero_grad()
+
+        logger.log_train(
+            epoch=epoch + 1,
+            step=step + 1,
+            total_steps=total_steps,
+            batch_size=int(clean_images.shape[0]),
+            loss=total_loss_value,
+            running_loss=running_total_loss / max(running_steps, 1),
+            mse_loss=mse_loss_value,
+            running_mse_loss=running_mse_loss / max(running_steps, 1),
+            kl_loss=kl_loss_value,
+            running_kl_loss=running_kl_loss / max(running_steps, 1),
+            kl_weight=args.kl_weight,
+            lr=optimizer.param_groups[0]["lr"],
+            optimizer_step_taken=int(should_step),
+        )
 
     return epoch_total_loss / max(epoch_steps, 1)
 
@@ -421,27 +400,24 @@ def log_training_info(
 ):
     if logger is None:
         return
-    logger.log_system_info(
-        package_names=[
-            "torch",
-            "torchvision",
-            "torchmetrics",
-            "numpy",
-            "flow_matching",
-        ]
-    )
+    logger.log_system_info()
     logger.log_info_block(
         "GLOBAL PARAMETERS",
         {
-            "task": "conditional_flow_matching_seismic_patch_reconstruction",
+            "task": "diffusers_autoencoder_kl_seismic",
             "train_data_dir": args.train_data_dir,
             "dataset_size": len(dataset),
             "num_batches_per_epoch": len(dataloader),
-            "model_arch": args.model_arch,
-            "model_config": {
-                "architecture": args.model_arch,
-                **DIT_MODEL_CONFIG,
-            },
+            "normalization": "pre_normalized_minus_one_to_one",
+            "input_channels": args.input_channels,
+            "output_channels": 1,
+            "input_size": args.input_size,
+            "latent_channels": args.latent_channels,
+            "latent_size": args.latent_size,
+            "latent_shape": [args.latent_channels, args.latent_size, args.latent_size],
+            "hidden_channels": args.hidden_channels,
+            "channel_multipliers": args.channel_multipliers,
+            "mode": training_mode_name(args),
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -453,11 +429,14 @@ def log_training_info(
             "adam_beta1": args.adam_beta1,
             "adam_beta2": args.adam_beta2,
             "lr_schedule": args.lr_schedule,
-            "missing_ratio_range": args.missing_ratio_range,
-            "ssim_loss_weight": args.ssim_loss_weight,
+            "loss": "mse_plus_kl",
+            "kl_weight": args.kl_weight,
+            "scaling_factor": model.config.scaling_factor,
+            "block_out_channels": list(model.config.block_out_channels),
+            "layers_per_block": model.config.layers_per_block,
             "amp": True,
             "model": str(model),
-        }
+        },
     )
 
 
@@ -477,15 +456,44 @@ def save_training_checkpoint(
         "optimizer": optimizer.state_dict(),
         "lr_scheduler": lr_scheduler.state_dict(),
         "amp_scaler": scaler.state_dict(),
-        "model_arch": args.model_arch,
-        "model_config": {
-            "architecture": args.model_arch,
-            **DIT_MODEL_CONFIG,
-        },
+        "model_config": dict(model.config),
         "args": vars(args),
     }
     torch.save(checkpoint, checkpoint_path)
     return checkpoint_path
+
+
+def load_training_checkpoint(
+        checkpoint_path,
+        model,
+        optimizer,
+        lr_scheduler,
+        scaler,
+        device,
+):
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+    try:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+
+    if "lr_scheduler" in checkpoint and checkpoint["lr_scheduler"]:
+        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+
+    if "amp_scaler" in checkpoint and checkpoint["amp_scaler"]:
+        scaler.load_state_dict(checkpoint["amp_scaler"])
+
+    return int(checkpoint.get("epoch", 0)), checkpoint
 
 
 def main(args):
@@ -510,15 +518,7 @@ def main(args):
     logger.log_node_info()
     logger.log_info_block("ARGPARSE PARAMETERS", args)
 
-    requested_device = args.device
-    device = resolve_device(requested_device)
-    args.device = str(device)
-    if str(device) != requested_device:
-        logger.log_event(
-            "device_fallback",
-            requested_device=requested_device,
-            selected_device=str(device),
-        )
+    device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()
     set_random_seed(seed)
 
@@ -531,28 +531,8 @@ def main(args):
         sampler=str(train_sampler),
     )
 
-    logger.log_event(
-        "vae_initializing",
-        vae_arch=args.vae_arch,
-        vae_ckpt=args.vae_ckpt,
-    )
-    vae, vae_checkpoint, vae_config = load_vae(args, device)
-    if vae_config.get("latent_channels") != 4 or vae_config.get("latent_size") != 32:
-        raise ValueError(
-            "train4_with_vae.py requires a VAE checkpoint with latent shape "
-            f"[4, 32, 32], got [{vae_config.get('latent_channels')}, "
-            f"{vae_config.get('latent_size')}, {vae_config.get('latent_size')}]."
-        )
-    logger.log_event(
-        "vae_initialized",
-        vae_arch=args.vae_arch,
-        vae_ckpt=args.vae_ckpt,
-        vae_checkpoint_epoch=vae_checkpoint.get("epoch"),
-        vae_config=vae_config,
-    )
-
-    logger.log_event("model_initializing", model_arch=args.model_arch)
-    model = build_model(args.model_arch, device)
+    logger.log_event("model_initializing")
+    model = build_model(args, device)
     model_without_ddp = model
 
     total_params, trainable_params, frozen_params = count_model_parameters(model_without_ddp)
@@ -608,27 +588,39 @@ def main(args):
     )
 
     scaler = AMPGradScaler(enabled=device.type == "cuda", device=device.type)
-    flow_path = CondOTProbPath()
-    ssim_metric = None
-    if args.ssim_loss_weight > 0:
-        ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
+
+    start_epoch = 0
+    if args.ckpt:
+        logger.log_event("checkpoint_loading", path=args.ckpt)
+        start_epoch, checkpoint = load_training_checkpoint(
+            checkpoint_path=args.ckpt,
+            model=model_without_ddp,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            scaler=scaler,
+            device=device,
+        )
+        logger.log_event(
+            "checkpoint_loaded",
+            path=args.ckpt,
+            checkpoint_epoch=start_epoch,
+            start_epoch=start_epoch + 1,
+            checkpoint_model_config=checkpoint.get("model_config", ""),
+        )
 
     logger.log_event("training_started")
     start_time = time.time()
     checkpoint_dir = logger.run_dir
 
-    for epoch in range(args.num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         if args.distributed:
             train_loader.sampler.set_epoch(epoch)
 
         epoch_loss = train_one_epoch(
             model=model,
-            vae=vae,
             dataloader=train_loader,
             optimizer=optimizer,
             scaler=scaler,
-            flow_path=flow_path,
-            ssim_metric=ssim_metric,
             device=device,
             args=args,
             logger=logger,
@@ -662,11 +654,16 @@ def main(args):
         total_time_sec=total_time,
         run_dir=str(checkpoint_dir),
     )
-    logger.close()
 
     if args.distributed:
+        logger.log_event("final_barrier_started", rank=args.rank, gpu=args.gpu)
         distributed_mode.barrier([args.gpu])
+        logger.log_event("final_barrier_finished", rank=args.rank, gpu=args.gpu)
+        logger.log_event("distributed_destroy_started", rank=args.rank)
         distributed_mode.destroy()
+        logger.log_event("distributed_destroy_finished", rank=args.rank)
+
+    logger.close()
 
 
 if __name__ == "__main__":

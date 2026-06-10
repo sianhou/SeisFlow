@@ -193,10 +193,46 @@ def kl_divergence(mu, logvar):
     return -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
 
 
+#################################################################################
+#                            Seismic VAE Configs                                #
+#################################################################################
+
+def _build_seismic_vae(latent_channels, latent_size, **kwargs):
+    config = {
+        "input_channels": 1,
+        "output_channels": 1,
+        "latent_channels": latent_channels,
+        "input_size": 256,
+        "latent_size": latent_size,
+        "hidden_channels": 32,
+        "use_vae": True,
+    }
+    config.update(kwargs)
+    return SeismicSpatialVAE(**config)
+
+
+def SeismicVAE_C4_64(**kwargs):
+    return _build_seismic_vae(latent_channels=4, latent_size=64, **kwargs)
+
+
+def SeismicVAE_C4_32(**kwargs):
+    return _build_seismic_vae(latent_channels=4, latent_size=32, **kwargs)
+
+
+def SeismicVAE_C4_16(**kwargs):
+    return _build_seismic_vae(latent_channels=4, latent_size=16, **kwargs)
+
+
+SeismicVAE_models = {
+    "SeismicVAE-C4/64": SeismicVAE_C4_64,
+    "SeismicVAE-C4/32": SeismicVAE_C4_32,
+    "SeismicVAE-C4/16": SeismicVAE_C4_16,
+}
+
+
 if __name__ == "__main__":
-    input_size = 256
-    vae = SeismicSpatialVAE(input_size=input_size)
-    input = torch.randn(4, 1, input_size, input_size)
+    vae = SeismicVAE_models["SeismicVAE-C4/32"]()
+    input = torch.randn(4, 1, vae.config.input_size, vae.config.input_size)
 
     output = vae(input)
 
