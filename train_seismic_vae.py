@@ -1,37 +1,17 @@
 import argparse
 import gc
-import math
 import os
 import time
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from diffusers.models import AutoencoderKL
 
 from core.dataset import PatchDataset
 from core.logging.logger import DistributedSimpleLogger2
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
+from models.wrapper import AutoencoderKLWrapper, build_autoencoder_kl_wrapper
 from training import distributed_mode
-
-
-class SeismicAutoencoderKL(AutoencoderKL):
-    def forward(self, sample, sample_posterior=True, return_dict=True, generator=None):
-        posterior = self.encode(sample).latent_dist
-        if sample_posterior:
-            latents = posterior.sample(generator=generator)
-        else:
-            latents = posterior.mode()
-        reconstruction = self.decode(latents).sample
-
-        outputs = {
-            "recon": reconstruction,
-            "mean": posterior.mean,
-            "logvar": posterior.logvar,
-        }
-        if return_dict:
-            return outputs
-        return tuple(outputs.values())
 
 
 def build_parser():
@@ -52,7 +32,7 @@ def build_parser():
     parser.add_argument(
         "--ckpt",
         default=None,
-        help="Optional checkpoint PTH file used to resume training in a new run directory.",
+        help="Optional checkpoint directory used to resume training in a new run directory.",
     )
     parser.add_argument(
         "--batch_size",
@@ -228,49 +208,6 @@ def build_dataloader(args):
     return dataset, sampler, dataloader
 
 
-def build_model(args, device):
-    compression = args.input_size // args.latent_size
-    if (
-            args.input_size % args.latent_size != 0
-            or compression < 1
-            or compression & (compression - 1) != 0
-    ):
-        raise ValueError("input_size / latent_size must be a positive power of two.")
-
-    num_blocks = int(math.log2(compression)) + 1
-    if args.channel_multipliers:
-        channel_multipliers = tuple(args.channel_multipliers)
-        if len(channel_multipliers) != num_blocks:
-            raise ValueError(
-                "channel_multipliers length must equal "
-                "log2(input_size / latent_size) + 1."
-            )
-    else:
-        channel_multipliers = tuple(min(2 ** idx, 8) for idx in range(num_blocks))
-
-    block_out_channels = tuple(
-        args.hidden_channels * multiplier for multiplier in channel_multipliers
-    )
-    down_block_types = ("DownEncoderBlock2D",) * num_blocks
-    up_block_types = ("UpDecoderBlock2D",) * num_blocks
-
-    model = SeismicAutoencoderKL(
-        in_channels=args.input_channels,
-        out_channels=1,
-        down_block_types=down_block_types,
-        up_block_types=up_block_types,
-        block_out_channels=block_out_channels,
-        layers_per_block=1,
-        act_fn="silu",
-        latent_channels=args.latent_channels,
-        norm_num_groups=32,
-        sample_size=args.input_size,
-        scaling_factor=1.0,
-        force_upcast=True,
-    ).to(device)
-    return model
-
-
 def compute_loss(outputs, clean_images, args):
     mse = F.mse_loss(outputs["recon"], clean_images)
     kl = -0.5 * torch.mean(
@@ -431,69 +368,13 @@ def log_training_info(
             "lr_schedule": args.lr_schedule,
             "loss": "mse_plus_kl",
             "kl_weight": args.kl_weight,
-            "scaling_factor": model.config.scaling_factor,
-            "block_out_channels": list(model.config.block_out_channels),
-            "layers_per_block": model.config.layers_per_block,
+            "scaling_factor": model.model.config.scaling_factor,
+            "block_out_channels": list(model.model.config.block_out_channels),
+            "layers_per_block": model.model.config.layers_per_block,
             "amp": True,
             "model": str(model),
         },
     )
-
-
-def save_training_checkpoint(
-        model,
-        optimizer,
-        lr_scheduler,
-        scaler,
-        args,
-        epoch,
-        output_dir,
-):
-    checkpoint_path = Path(output_dir) / f"checkpoint_epoch_{epoch + 1:05d}.pth"
-    checkpoint = {
-        "epoch": epoch + 1,
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "lr_scheduler": lr_scheduler.state_dict(),
-        "amp_scaler": scaler.state_dict(),
-        "model_config": dict(model.config),
-        "args": vars(args),
-    }
-    torch.save(checkpoint, checkpoint_path)
-    return checkpoint_path
-
-
-def load_training_checkpoint(
-        checkpoint_path,
-        model,
-        optimizer,
-        lr_scheduler,
-        scaler,
-        device,
-):
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-
-    try:
-        checkpoint = torch.load(
-            checkpoint_path,
-            map_location=device,
-            weights_only=False,
-        )
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-
-    if "lr_scheduler" in checkpoint and checkpoint["lr_scheduler"]:
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-
-    if "amp_scaler" in checkpoint and checkpoint["amp_scaler"]:
-        scaler.load_state_dict(checkpoint["amp_scaler"])
-
-    return int(checkpoint.get("epoch", 0)), checkpoint
 
 
 def main(args):
@@ -532,7 +413,16 @@ def main(args):
     )
 
     logger.log_event("model_initializing")
-    model = build_model(args, device)
+    model = build_autoencoder_kl_wrapper(
+        input_size=args.input_size,
+        latent_size=args.latent_size,
+        input_channels=args.input_channels,
+        output_channels=1,
+        latent_channels=args.latent_channels,
+        hidden_channels=args.hidden_channels,
+        channel_multipliers=args.channel_multipliers,
+        device=device,
+    )
     model_without_ddp = model
 
     total_params, trainable_params, frozen_params = count_model_parameters(model_without_ddp)
@@ -592,20 +482,19 @@ def main(args):
     start_epoch = 0
     if args.ckpt:
         logger.log_event("checkpoint_loading", path=args.ckpt)
-        start_epoch, checkpoint = load_training_checkpoint(
-            checkpoint_path=args.ckpt,
-            model=model_without_ddp,
+        loaded_model, start_epoch, training_state = AutoencoderKLWrapper.from_training(
+            save_directory=args.ckpt,
             optimizer=optimizer,
             lr_scheduler=lr_scheduler,
             scaler=scaler,
             device=device,
         )
+        model_without_ddp.model.load_state_dict(loaded_model.model.state_dict())
         logger.log_event(
             "checkpoint_loaded",
             path=args.ckpt,
             checkpoint_epoch=start_epoch,
             start_epoch=start_epoch + 1,
-            checkpoint_model_config=checkpoint.get("model_config", ""),
         )
 
     logger.log_event("training_started")
@@ -613,8 +502,7 @@ def main(args):
     checkpoint_dir = logger.run_dir
 
     for epoch in range(start_epoch, args.num_epochs):
-        if args.distributed:
-            train_loader.sampler.set_epoch(epoch)
+        train_sampler.set_epoch(epoch)
 
         epoch_loss = train_one_epoch(
             model=model,
@@ -633,14 +521,17 @@ def main(args):
                 (epoch + 1) % args.save_every_epochs == 0
                 and distributed_mode.get_rank() == 0
         ):
-            checkpoint_path = save_training_checkpoint(
-                model=model_without_ddp,
+            checkpoint_path = (
+                    Path(checkpoint_dir)
+                    / f"checkpoint_epoch_{epoch + 1:05d}"
+            )
+            model_without_ddp.save_training(
+                save_directory=checkpoint_path,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
                 scaler=scaler,
                 args=args,
-                epoch=epoch,
-                output_dir=checkpoint_dir,
+                epoch=epoch + 1,
             )
             logger.log_event(
                 "checkpoint_saved",
