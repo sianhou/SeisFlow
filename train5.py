@@ -14,7 +14,11 @@ from core.logging.logger import DistributedSimpleLogger2
 from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
-from models.reconstruction_model_configs import MODEL_CONFIGS, build_model
+from models.wrapper import (
+    DIT_TRANSFORMER_2D_CONFIGS,
+    DiTTransformer2DWrapper,
+    build_dit_transformer_2d_wrapper,
+)
 from training import distributed_mode
 
 
@@ -40,9 +44,20 @@ def build_parser():
     )
     parser.add_argument(
         "--model_arch",
-        choices=sorted(MODEL_CONFIGS.keys()),
-        default="dit",
+        choices=sorted(DIT_TRANSFORMER_2D_CONFIGS.keys()),
+        default="DiT_T_4",
         help="Model architecture to train.",
+    )
+    parser.add_argument(
+        "--input_size",
+        default=64,
+        type=int,
+        help="Height and width of the square training patches.",
+    )
+    parser.add_argument(
+        "--ckpt",
+        default=None,
+        help="Optional checkpoint directory saved by a previous train5.py run.",
     )
     parser.add_argument(
         "--batch_size",
@@ -213,7 +228,12 @@ def train_one_epoch(
         clean_images = batch.to(device, non_blocking=True)
         if clean_images.shape[1] != 1:
             raise ValueError(
-                f"train4.py expects single-channel patches, got shape {tuple(clean_images.shape)}."
+                f"train5.py expects single-channel patches, got shape {tuple(clean_images.shape)}."
+            )
+        if clean_images.shape[-2:] != (args.input_size, args.input_size):
+            raise ValueError(
+                f"Expected {args.input_size}x{args.input_size} patches, "
+                f"got shape {tuple(clean_images.shape)}."
             )
         mask_ratio = np.random.uniform(*args.missing_ratio_range)
         observed_mask = generate_random_row_mask(x=clean_images, missing_ratio=mask_ratio)
@@ -321,7 +341,7 @@ def log_training_info(
             "dataset_size": len(dataset),
             "num_batches_per_epoch": len(dataloader),
             "model_arch": args.model_arch,
-            "model_config": MODEL_CONFIGS[args.model_arch],
+            "model_config": dict(model.model.config),
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -339,30 +359,6 @@ def log_training_info(
             "model": str(model),
         }
     )
-
-
-def save_training_checkpoint(
-        model,
-        optimizer,
-        lr_scheduler,
-        scaler,
-        args,
-        epoch,
-        output_dir,
-):
-    checkpoint_path = Path(output_dir) / f"checkpoint_epoch_{epoch + 1:05d}.pth"
-    checkpoint = {
-        "epoch": epoch + 1,
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "lr_scheduler": lr_scheduler.state_dict(),
-        "amp_scaler": scaler.state_dict(),
-        "model_arch": args.model_arch,
-        "model_config": MODEL_CONFIGS[args.model_arch],
-        "args": vars(args),
-    }
-    torch.save(checkpoint, checkpoint_path)
-    return checkpoint_path
 
 
 def main(args):
@@ -401,7 +397,14 @@ def main(args):
     )
 
     logger.log_event("model_initializing", model_arch=args.model_arch)
-    model = build_model(args.model_arch, device)
+    model = build_dit_transformer_2d_wrapper(
+        model_arch=args.model_arch,
+        in_channels=3,
+        out_channels=1,
+        sample_size=args.input_size,
+        num_embeds_ada_norm=1,
+        device=device,
+    )
     model_without_ddp = model
 
     total_params, trainable_params, frozen_params = count_model_parameters(model_without_ddp)
@@ -462,11 +465,31 @@ def main(args):
     if args.ssim_loss_weight > 0:
         ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
 
+    start_epoch = 0
+    if args.ckpt:
+        logger.log_event("checkpoint_loading", path=args.ckpt)
+        loaded_model, start_epoch, training_state = (
+            DiTTransformer2DWrapper.from_training(
+                save_directory=args.ckpt,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                scaler=scaler,
+                device=device,
+            )
+        )
+        model_without_ddp.model.load_state_dict(loaded_model.model.state_dict())
+        logger.log_event(
+            "checkpoint_loaded",
+            path=args.ckpt,
+            checkpoint_epoch=start_epoch,
+            start_epoch=start_epoch + 1,
+        )
+
     logger.log_event("training_started")
     start_time = time.time()
     checkpoint_dir = logger.run_dir
 
-    for epoch in range(args.num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         if args.distributed:
             train_loader.sampler.set_epoch(epoch)
 
@@ -489,14 +512,17 @@ def main(args):
                 (epoch + 1) % args.save_every_epochs == 0
                 and distributed_mode.get_rank() == 0
         ):
-            checkpoint_path = save_training_checkpoint(
-                model=model_without_ddp,
+            checkpoint_path = (
+                    Path(checkpoint_dir)
+                    / f"checkpoint_epoch_{epoch + 1:05d}"
+            )
+            model_without_ddp.save_training(
+                save_directory=checkpoint_path,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
                 scaler=scaler,
                 args=args,
-                epoch=epoch,
-                output_dir=checkpoint_dir,
+                epoch=epoch + 1,
             )
             logger.log_event(
                 "checkpoint_saved",
