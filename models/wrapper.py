@@ -426,7 +426,7 @@ def build_dit_transformer_2d_wrapper(
         in_channels,
         sample_size,
         out_channels=None,
-        num_embeds_ada_norm=1,
+        num_embeds_ada_norm=1000,
         dropout=0.0,
         attention_bias=True,
         activation_fn="gelu-approximate",
