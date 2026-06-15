@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SF_PATH="/Users/housian/Workplaces/SeisFlow"
-RUN_DIR="output_train_vae_dataset256/20260610_222615_930581/"
-SEGY_FILE="ma2+GathAP.sgy"
+RUN_DIR="/Users/housian/Workplaces/SeisFlow/output_vae_i256_o32/"
+SEGY_FILE="/Users/housian/Workplaces/SeisFlow/ma2+GathAP.sgy"
 BATCH_SIZE=16
 DEVICE="cpu"
 MISSING_RATIO=0.5
@@ -11,9 +11,9 @@ MISSING_RATIO=0.5
 cd "${SF_PATH}"
 shopt -s nullglob
 
-CHECKPOINTS=("${RUN_DIR}"/checkpoint_epoch_*.pth)
+CHECKPOINTS=("${RUN_DIR}"/checkpoint_epoch_*)
 if (( ${#CHECKPOINTS[@]} == 0 )); then
-  echo "No checkpoint files found in ${RUN_DIR}" >&2
+  echo "No checkpoint directories found in ${RUN_DIR}" >&2
   exit 1
 fi
 
@@ -22,9 +22,21 @@ SKIPPED=0
 FAILED=0
 
 for CHECKPOINT in "${CHECKPOINTS[@]}"; do
-  FILE_TYPE="$(file -b "${CHECKPOINT}")"
-  if [[ "${FILE_TYPE}" == *"tar archive"* ]]; then
-    echo "Skipping non-PyTorch tar archive: ${CHECKPOINT}" >&2
+  if [[ ! -d "${CHECKPOINT}" ]]; then
+    echo "Skipping non-directory checkpoint: ${CHECKPOINT}" >&2
+    ((SKIPPED += 1))
+    continue
+  fi
+
+  if [[ ! -f "${CHECKPOINT}/config.json" ]]; then
+    echo "Skipping checkpoint without config.json: ${CHECKPOINT}" >&2
+    ((SKIPPED += 1))
+    continue
+  fi
+
+  if [[ ! -f "${CHECKPOINT}/diffusion_pytorch_model.safetensors" \
+        && ! -f "${CHECKPOINT}/diffusion_pytorch_model.bin" ]]; then
+    echo "Skipping checkpoint without Diffusers model weights: ${CHECKPOINT}" >&2
     ((SKIPPED += 1))
     continue
   fi
