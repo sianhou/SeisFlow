@@ -72,6 +72,17 @@ def build_parser():
         help="Number of mini-batches to accumulate before each optimizer step.",
     )
     parser.add_argument(
+        "--clip_grad",
+        default=1.0,
+        type=float,
+        help="Max gradient norm. Set <= 0 to disable gradient clipping.",
+    )
+    parser.add_argument(
+        "--upcast_attention",
+        action="store_true",
+        help="Run attention score computation in fp32 for better mixed-precision stability.",
+    )
+    parser.add_argument(
         "--num_epochs",
         default=1000,
         type=int,
@@ -276,9 +287,11 @@ def train_one_epoch(
         loss = total_loss / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
         step_start_time = time.time()
-        scaler(
+        clip_grad = args.clip_grad if args.clip_grad > 0 else None
+        grad_norm = scaler(
             loss,
             optimizer,
+            clip_grad=clip_grad,
             parameters=model.parameters(),
             update_grad=should_step,
         )
@@ -296,6 +309,8 @@ def train_one_epoch(
             "lr": learning_rate,
             "mask_ratio": float(mask_ratio),
             "optimizer_step": int(should_step),
+            "grad_norm": "" if grad_norm is None else float(grad_norm.detach().cpu()),
+            "clip_grad": "" if clip_grad is None else clip_grad,
             "step_time_sec": time.time() - step_start_time,
         }
         if args.ssim_loss_weight > 0:
@@ -403,6 +418,7 @@ def main(args):
         out_channels=1,
         sample_size=args.input_size,
         num_embeds_ada_norm=1,
+        upcast_attention=args.upcast_attention,
         device=device,
     )
     model_without_ddp = model
