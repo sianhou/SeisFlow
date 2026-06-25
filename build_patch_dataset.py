@@ -1,24 +1,7 @@
 import argparse
 import os
-import sys
-from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-
-@dataclass
-class BuildStats:
-    total_shots: int = 0
-    saved_files: int = 0
-    skipped_files: int = 0
-    total_patches_before_filter: int = 0
-    total_patches_saved: int = 0
-    skipped_zero_patches: int = 0
 
 
 def build_sample_transform(args):
@@ -55,6 +38,72 @@ def filter_zero_patches(patches, positions):
     return filtered_patches, filtered_positions, skipped
 
 
+def build_pos_arrays(shape):
+    height, width = shape
+    pos_trace = np.arange(height, dtype=np.float32)[:, None]
+    pos_sample = np.arange(width, dtype=np.float32)[None, :]
+    return (
+        np.broadcast_to(pos_trace, (height, width)).copy(),
+        np.broadcast_to(pos_sample, (height, width)).copy(),
+    )
+
+
+def build_auxiliary_patches(sample, patch_processor, patch_size, overlap, positions, original_shape):
+    sx = sample[1].numpy()
+    sy = sample[2].numpy()
+    rx = sample[3].numpy()
+    ry = sample[4].numpy()
+    pos_trace, pos_sample = build_pos_arrays(original_shape)
+
+    sx_patches, sx_positions, sx_shape = patch_processor.extract_overlapping_patches_2d(
+        sx,
+        patch_size=patch_size,
+        overlap=overlap,
+    )
+    sy_patches, sy_positions, sy_shape = patch_processor.extract_overlapping_patches_2d(
+        sy,
+        patch_size=patch_size,
+        overlap=overlap,
+    )
+    rx_patches, rx_positions, rx_shape = patch_processor.extract_overlapping_patches_2d(
+        rx,
+        patch_size=patch_size,
+        overlap=overlap,
+    )
+    ry_patches, ry_positions, ry_shape = patch_processor.extract_overlapping_patches_2d(
+        ry,
+        patch_size=patch_size,
+        overlap=overlap,
+    )
+    pos_trace_patches, pos_trace_positions, pos_trace_shape = patch_processor.extract_overlapping_patches_2d(
+        pos_trace,
+        patch_size=patch_size,
+        overlap=overlap,
+    )
+    pos_sample_patches, pos_sample_positions, pos_sample_shape = patch_processor.extract_overlapping_patches_2d(
+        pos_sample,
+        patch_size=patch_size,
+        overlap=overlap,
+    )
+
+    for name, channel_positions, channel_shape in (
+            ("sx", sx_positions, sx_shape),
+            ("sy", sy_positions, sy_shape),
+            ("rx", rx_positions, rx_shape),
+            ("ry", ry_positions, ry_shape),
+            ("pos_trace", pos_trace_positions, pos_trace_shape),
+            ("pos_sample", pos_sample_positions, pos_sample_shape),
+    ):
+        if not np.array_equal(positions, channel_positions) or original_shape != channel_shape:
+            raise RuntimeError(f"{name} patch grid does not match shot patch grid.")
+
+    auxiliary_patches = np.stack(
+        [sx_patches, sy_patches, rx_patches, ry_patches, pos_trace_patches, pos_sample_patches],
+        axis=1,
+    )
+    return auxiliary_patches
+
+
 def normalize_patches_per_channel_abs(patches):
     import torch
 
@@ -83,6 +132,10 @@ def clip_patches(patches, vmin=None, vmax=None):
     clipper = Clip(vmin=vmin, vmax=vmax, per_channel=True)
     clipped = clipper(patches_tensor)
     return clipped.squeeze(1).cpu().numpy()
+
+
+def build_aux_output_dir(output_dir):
+    return f"{output_dir.rstrip(os.sep)}_aux"
 
 
 def create_parser():
@@ -116,14 +169,14 @@ def create_parser():
                         help="Optional upper clipping bound applied before normalization.")
     parser.add_argument("--normalize", action="store_true",
                         help="Normalize each saved patch independently with per_channel+abs to [-1, 1].")
+    parser.add_argument("--auxiliary_data", action="store_true",
+                        help="Save 6-channel auxiliary patches [sx, sy, rx, ry, pos_trace, pos_sample] instead of amplitude patches.")
+    parser.add_argument("--keep_zeros_patch", action="store_true",
+                        help="Keep patches whose amplitude channel is all zero. By default, all-zero amplitude patches are skipped.")
     parser.add_argument("--slice", nargs=2, type=int, default=[0, 0],
                         help="Slice range on the last dimension as two ints: start end. Use 0 0 to disable.")
     parser.add_argument("--resize", nargs=2, type=int, default=[0, 0],
                         help="Resize target as two ints: height width. Use 0 0 to disable.")
-    parser.add_argument("--plot_start", default=0, type=int,
-                        help="First patch index used for visualization in test_data.")
-    parser.add_argument("--plot_interval", default=100, type=int,
-                        help="Plot every N patches from --plot_start in test_data.")
     return parser
 
 
@@ -138,10 +191,6 @@ def validate_args(args):
         raise ValueError("--resize values must be non-negative. Use 0 0 to disable.")
     if args.clip_vmin is not None and args.clip_vmax is not None and args.clip_vmin > args.clip_vmax:
         raise ValueError("--clip_vmin must be less than or equal to --clip_vmax.")
-    if args.plot_start < 0:
-        raise ValueError("--plot_start must be non-negative.")
-    if args.plot_interval <= 0:
-        raise ValueError("--plot_interval must be positive.")
 
 
 def build_dataset(args):
@@ -150,6 +199,9 @@ def build_dataset(args):
 
     validate_args(args)
     os.makedirs(args.output_dir, exist_ok=True)
+    aux_output_dir = build_aux_output_dir(args.output_dir)
+    if args.auxiliary_data:
+        os.makedirs(aux_output_dir, exist_ok=True)
 
     sample_transform = build_sample_transform(args)
     dataset = SegyDataset(args.segy, transform=sample_transform)
@@ -157,22 +209,37 @@ def build_dataset(args):
     patch_size = (args.patch_size, args.patch_size)
     overlap_size = (args.overlap_size, args.overlap_size)
     patch_processor = NumpyPatchProcessor()
-    stats = BuildStats(total_shots=len(dataset))
 
     for i in range(len(dataset)):
-        shot = dataset[i][0].numpy()
+        sample = dataset[i]
+        shot = sample[0].numpy()
         patches, positions, original_shape = patch_processor.extract_overlapping_patches_2d(
             shot,
             patch_size=patch_size,
             overlap=overlap_size,
         )
-        stats.total_patches_before_filter += len(patches)
 
-        patches, positions, skipped_zero_patches = filter_zero_patches(patches, positions)
-        stats.skipped_zero_patches += skipped_zero_patches
+        if args.auxiliary_data:
+            auxiliary_patches = build_auxiliary_patches(
+                sample,
+                patch_processor=patch_processor,
+                patch_size=patch_size,
+                overlap=overlap_size,
+                positions=positions,
+                original_shape=original_shape,
+            )
+
+        if args.keep_zeros_patch:
+            skipped_zero_patches = 0
+        else:
+            keep_mask = np.any(patches != 0, axis=(1, 2))
+            patches = patches[keep_mask]
+            positions = [pos for pos, keep in zip(positions, keep_mask) if keep]
+            if args.auxiliary_data:
+                auxiliary_patches = auxiliary_patches[keep_mask]
+            skipped_zero_patches = int((~keep_mask).sum())
 
         if len(patches) == 0:
-            stats.skipped_files += 1
             print(f"Skipped shot {i:04d}: all patches are zero")
             continue
 
@@ -185,75 +252,17 @@ def build_dataset(args):
         output_file = os.path.join(args.output_dir, f"patches_{i:04d}.npy")
         np.save(output_file, patches)
 
-        stats.saved_files += 1
-        stats.total_patches_saved += len(patches)
+        if args.auxiliary_data:
+            aux_output_file = os.path.join(aux_output_dir, f"patches_{i:04d}.npy")
+            np.save(aux_output_file, auxiliary_patches)
 
         print(
             f"Saved {output_file} with {len(patches)} patches "
             f"(skipped zero patches: {skipped_zero_patches})"
         )
 
-    print("\nBuild summary")
-    print(f"segy: {args.segy}")
-    print(f"output_dir: {args.output_dir}")
-    print(f"total_shots: {stats.total_shots}")
-    print(f"saved_files: {stats.saved_files}")
-    print(f"skipped_files: {stats.skipped_files}")
-    print(f"total_patches_before_filter: {stats.total_patches_before_filter}")
-    print(f"total_patches_saved: {stats.total_patches_saved}")
-    print(f"skipped_zero_patches: {stats.skipped_zero_patches}")
-    print(f"slice_range: {args.slice}")
-    print(f"resize: {args.resize}")
-    print(f"clip_vmin: {args.clip_vmin}")
-    print(f"clip_vmax: {args.clip_vmax}")
-    print(f"normalize: {args.normalize}")
-
-
-def test_data(args):
-    import matplotlib.pyplot as plt
-
-    from core.dataset import PatchDataset
-
-    print("Creating patch dataset")
-    pd = PatchDataset(data_path=args.output_dir)
-    total_patches = len(pd)
-    print(f"total patches: {total_patches}")
-
-    if total_patches == 0:
-        print("No patches available for visualization")
-        return
-
-    plot_start = min(args.plot_start, total_patches - 1)
-    plot_indices = range(plot_start, total_patches, args.plot_interval)
-    figures_dir = os.path.join(args.output_dir, "figures")
-    os.makedirs(figures_dir, exist_ok=True)
-
-    for patch_index in plot_indices:
-        patch = pd[patch_index]
-        patch_np = patch.squeeze(0).detach().cpu().numpy()
-
-        print(f"Visualizing patch index: {patch_index}")
-        print(
-            f"patch stats: min={patch_np.min():.6f}, "
-            f"max={patch_np.max():.6f}, mean={patch_np.mean():.6f}"
-        )
-
-        plt.figure(figsize=(6, 6))
-        if args.normalize:
-            plt.imshow(patch_np.T, cmap="seismic", origin="upper", vmin=-1, vmax=1)
-        else:
-            plt.imshow(patch_np.T, cmap="seismic", origin="upper")
-        plt.title(f"Patch #{patch_index}")
-        plt.colorbar()
-        plt.tight_layout()
-        figure_file = os.path.join(figures_dir, f"patch_{patch_index:06d}.png")
-        plt.savefig(figure_file, dpi=150)
-        plt.close()
-        print(f"Saved figure: {figure_file}")
-
 
 if __name__ == '__main__':
     parser = create_parser()
     args = parser.parse_args()
     build_dataset(args)
-    test_data(args)
