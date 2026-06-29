@@ -116,3 +116,30 @@ class PatchDataset(Dataset):
             patch = self.transform(patch)
 
         return patch
+
+
+class PairedPatchDataset(Dataset):
+    def __init__(self, data_path0, data_path1, transform=None, npy=True, verbose=False):
+        self.dataset0 = PatchDataset(
+            data_path0,
+            transform=transform,
+            npy=npy,
+            verbose=verbose,
+        )
+        self.dataset1 = PatchDataset(
+            data_path1,
+            transform=transform,
+            npy=npy,
+            verbose=verbose,
+        )
+        if len(self.dataset0) != len(self.dataset1):
+            raise ValueError(
+                "PairedPatchDataset inputs must contain the same number of patches: "
+                f"got {len(self.dataset0)} and {len(self.dataset1)}."
+            )
+
+    def __len__(self):
+        return len(self.dataset0)
+
+    def __getitem__(self, idx):
+        return self.dataset0[idx], self.dataset1[idx]

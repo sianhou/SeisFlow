@@ -4,14 +4,11 @@ import os
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from torchmetrics.image import StructuralSimilarityIndexMeasure
 
-from core.dataset import PatchDataset
+from core.dataset import PairedPatchDataset
 from core.logging.logger import DistributedSimpleLogger2
-from core.masks.row_mask import generate_random_row_mask
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
 from models.wrapper import (
@@ -25,7 +22,7 @@ from training import distributed_mode
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Train a conditional flow-matching model for seismic patch reconstruction with random row masking."
+            "Train a conditional flow-matching model from noise to seismic patches with auxiliary coordinates."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -65,7 +62,7 @@ def build_parser():
     parser.add_argument(
         "--ckpt",
         default=None,
-        help="Optional checkpoint directory saved by a previous train5.py run.",
+        help="Optional checkpoint directory saved by a previous train6.py run.",
     )
     parser.add_argument(
         "--batch_size",
@@ -107,20 +104,6 @@ def build_parser():
         choices=["constant", "linear"],
         default="constant",
         help="Learning-rate schedule to use during training.",
-    )
-    parser.add_argument(
-        "--missing_ratio_range",
-        nargs=2,
-        type=float,
-        default=[0.3, 0.7],
-        metavar=("MIN", "MAX"),
-        help="Range of random missing ratios sampled per batch.",
-    )
-    parser.add_argument(
-        "--ssim_loss_weight",
-        default=0.0,
-        type=float,
-        help="Weight for optional SSIM reconstruction loss. Set 0 to disable.",
     )
     parser.add_argument(
         "--num_workers",
@@ -192,7 +175,7 @@ def build_parser():
 
 
 def build_dataloader(args):
-    dataset = PatchDataset(args.train_data_dir)
+    dataset = PairedPatchDataset(args.train_data_dir, args.train_data_aux_dir)
 
     sampler = torch.utils.data.DistributedSampler(
         dataset,
@@ -219,7 +202,6 @@ def train_one_epoch(
         optimizer,
         scaler,
         flow_path,
-        ssim_metric,
         device,
         args,
         logger,
@@ -230,7 +212,6 @@ def train_one_epoch(
 
     running_total_loss = 0.0
     running_velocity_loss = 0.0
-    running_ssim_loss = 0.0
     running_steps = 0
     epoch_total_loss = 0.0
     epoch_steps = 0
@@ -241,23 +222,25 @@ def train_one_epoch(
             optimizer.zero_grad()
             running_total_loss = 0.0
             running_velocity_loss = 0.0
-            running_ssim_loss = 0.0
             running_steps = 0
 
-        clean_images = batch.to(device, non_blocking=True)
+        clean_images, conditioning = batch
+        clean_images = clean_images.to(device, non_blocking=True)
+        conditioning = conditioning.to(device, non_blocking=True)
         if clean_images.shape[1] != 1:
             raise ValueError(
-                f"train5.py expects single-channel patches, got shape {tuple(clean_images.shape)}."
+                f"train6.py expects single-channel image patches, got shape {tuple(clean_images.shape)}."
             )
         if clean_images.shape[-2:] != (args.input_size, args.input_size):
             raise ValueError(
                 f"Expected {args.input_size}x{args.input_size} patches, "
                 f"got shape {tuple(clean_images.shape)}."
             )
-        mask_ratio = np.random.uniform(*args.missing_ratio_range)
-        observed_mask = generate_random_row_mask(x=clean_images, missing_ratio=mask_ratio)
-        masked_images = observed_mask * clean_images
-        conditioning = torch.cat((masked_images, observed_mask), dim=1)
+        if conditioning.shape[-2:] != (args.input_size, args.input_size):
+            raise ValueError(
+                f"Expected {args.input_size}x{args.input_size} auxiliary patches, "
+                f"got shape {tuple(conditioning.shape)}."
+            )
 
         noise = torch.randn_like(clean_images)
         timesteps = torch.rand(clean_images.shape[0], device=device)
@@ -272,23 +255,13 @@ def train_one_epoch(
                 extra={"concat_conditioning": conditioning},
             )
             velocity_loss = F.mse_loss(predicted_velocity, target_velocity)
-
             total_loss = velocity_loss
-            ssim_loss = torch.zeros((), device=device)
-            if args.ssim_loss_weight > 0:
-                timesteps_reshaped = timesteps.view(-1, 1, 1, 1)
-                predicted_images = noisy_images + (1.0 - timesteps_reshaped) * predicted_velocity
-                ssim_score = ssim_metric(predicted_images, clean_images)
-                ssim_loss = 1.0 - ssim_score
-                total_loss = total_loss + args.ssim_loss_weight * ssim_loss
 
         total_loss_value = float(total_loss.detach().cpu())
         velocity_loss_value = float(velocity_loss.detach().cpu())
         running_total_loss += total_loss_value
         running_velocity_loss += velocity_loss_value
         running_steps += 1
-        if args.ssim_loss_weight > 0:
-            running_ssim_loss += float(ssim_loss.detach().cpu())
         epoch_total_loss += total_loss_value
         epoch_steps += 1
 
@@ -315,20 +288,11 @@ def train_one_epoch(
             "velocity_loss": velocity_loss_value,
             "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
             "lr": learning_rate,
-            "mask_ratio": float(mask_ratio),
             "optimizer_step": int(should_step),
             "grad_norm": "" if grad_norm is None else float(grad_norm.detach().cpu()),
             "clip_grad": "" if clip_grad is None else clip_grad,
             "step_time_sec": time.time() - step_start_time,
         }
-        if args.ssim_loss_weight > 0:
-            train_fields.update(
-                {
-                    "ssim_loss": float(ssim_loss.detach().cpu()),
-                    "running_ssim_loss": running_ssim_loss / max(running_steps, 1),
-                    "ssim_loss_weight": args.ssim_loss_weight,
-                }
-            )
         logger.log_train(**train_fields)
 
     return epoch_total_loss / max(epoch_steps, 1)
@@ -351,7 +315,6 @@ def log_training_info(
         package_names=[
             "torch",
             "torchvision",
-            "torchmetrics",
             "numpy",
             "flow_matching",
         ]
@@ -359,12 +322,14 @@ def log_training_info(
     logger.log_info_block(
         "GLOBAL PARAMETERS",
         {
-            "task": "conditional_flow_matching_seismic_patch_reconstruction",
+            "task": "auxiliary_conditioned_flow_matching_seismic_generation",
             "train_data_dir": args.train_data_dir,
+            "train_data_aux_dir": args.train_data_aux_dir,
             "dataset_size": len(dataset),
             "num_batches_per_epoch": len(dataloader),
             "model_arch": args.model_arch,
             "model_config": dict(model.model.config),
+            "aux_channels": dataset.dataset1[0].shape[0],
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -376,8 +341,6 @@ def log_training_info(
             "adam_beta1": args.adam_beta1,
             "adam_beta2": args.adam_beta2,
             "lr_schedule": args.lr_schedule,
-            "missing_ratio_range": args.missing_ratio_range,
-            "ssim_loss_weight": args.ssim_loss_weight,
             "amp": True,
             "model": str(model),
         }
@@ -410,11 +373,17 @@ def main(args):
     seed = args.seed + distributed_mode.get_rank()
     set_random_seed(seed)
 
-    logger.log_event("dataset_initializing", train_data_dir=args.train_data_dir)
+    logger.log_event(
+        "dataset_initializing",
+        train_data_dir=args.train_data_dir,
+        train_data_aux_dir=args.train_data_aux_dir,
+    )
     dataset, train_sampler, train_loader = build_dataloader(args)
+    aux_channels = dataset.dataset1[0].shape[0]
     logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
+        aux_channels=int(aux_channels),
         num_batches=len(train_loader),
         sampler=str(train_sampler),
     )
@@ -422,7 +391,7 @@ def main(args):
     logger.log_event("model_initializing", model_arch=args.model_arch)
     model = build_dit_transformer_2d_wrapper(
         model_arch=args.model_arch,
-        in_channels=3,
+        in_channels=1 + aux_channels,
         out_channels=1,
         sample_size=args.input_size,
         num_embeds_ada_norm=1,
@@ -485,9 +454,6 @@ def main(args):
 
     scaler = AMPGradScaler(enabled=device.type == "cuda", device=device.type)
     flow_path = CondOTProbPath()
-    ssim_metric = None
-    if args.ssim_loss_weight > 0:
-        ssim_metric = StructuralSimilarityIndexMeasure(data_range=2.0).to(device)
 
     start_epoch = 0
     if args.ckpt:
@@ -523,7 +489,6 @@ def main(args):
             optimizer=optimizer,
             scaler=scaler,
             flow_path=flow_path,
-            ssim_metric=ssim_metric,
             device=device,
             args=args,
             logger=logger,

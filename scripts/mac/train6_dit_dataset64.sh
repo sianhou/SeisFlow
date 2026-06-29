@@ -1,8 +1,9 @@
 #!/bin/bash
 
-python train5.py \
+python train6.py \
   --train_data_dir /Users/housian/Workplaces/SeisFlow/train_dataset64b/ \
-  --output_dir /Users/housian/Workplaces/SeisFlow/output_train_dit_size64/ \
+  --train_data_aux_dir /Users/housian/Workplaces/SeisFlow/train_dataset64b_aux/ \
+  --output_dir /Users/housian/Workplaces/SeisFlow/output_train_dit_size64b/ \
   --model_arch DiT_T_4 \
   --input_size 64 \
   --batch_size 32 \
