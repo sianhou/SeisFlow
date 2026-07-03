@@ -22,25 +22,19 @@ from training import distributed_mode
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Train a conditional flow-matching model from noise to seismic patches with auxiliary coordinates."
+            "Train a conditional flow-matching model from noise to seismic patches with dimension coordinates."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--train_data_dir",
-        default="./train_dataset",
-        help=(
-            "Directory containing training patch NPY files. If using a VAE, "
-            "patch values should be normalized to [-1, 1]."
-        ),
+        default="./dataset/train",
+        help="Directory containing training image patch NPY files.",
     )
     parser.add_argument(
-        "--train_data_aux_dir",
-        default="./train_dataset_aux",
-        help=(
-            "Directory containing training patch NPY files. If using a VAE, "
-            "patch values should be normalized to [-1, 1]."
-        ),
+        "--train_data_dim_dir",
+        default="./dataset/dim_train",
+        help="Directory containing training dimension-coordinate patch NPY files.",
     )
     parser.add_argument(
         "--output_dir",
@@ -175,7 +169,7 @@ def build_parser():
 
 
 def build_dataloader(args):
-    dataset = PairedPatchDataset(args.train_data_dir, args.train_data_aux_dir)
+    dataset = PairedPatchDataset(args.train_data_dir, args.train_data_dim_dir)
 
     sampler = torch.utils.data.DistributedSampler(
         dataset,
@@ -193,7 +187,7 @@ def build_dataloader(args):
         drop_last=True,
     )
 
-    return dataset, sampler, dataloader
+    return dataset, dataloader
 
 
 def train_one_epoch(
@@ -210,18 +204,16 @@ def train_one_epoch(
     gc.collect()
     model.train(True)
 
-    running_total_loss = 0.0
-    running_velocity_loss = 0.0
+    running_loss = 0.0
     running_steps = 0
-    epoch_total_loss = 0.0
+    epoch_loss = 0.0
     epoch_steps = 0
     total_steps = len(dataloader)
 
     for step, batch in enumerate(dataloader):
         if step % args.grad_accum_steps == 0:
             optimizer.zero_grad()
-            running_total_loss = 0.0
-            running_velocity_loss = 0.0
+            running_loss = 0.0
             running_steps = 0
 
         clean_images, conditioning = batch
@@ -238,7 +230,7 @@ def train_one_epoch(
             )
         if conditioning.shape[-2:] != (args.input_size, args.input_size):
             raise ValueError(
-                f"Expected {args.input_size}x{args.input_size} auxiliary patches, "
+                f"Expected {args.input_size}x{args.input_size} dimension patches, "
                 f"got shape {tuple(conditioning.shape)}."
             )
 
@@ -254,23 +246,20 @@ def train_one_epoch(
                 timesteps,
                 extra={"concat_conditioning": conditioning},
             )
-            velocity_loss = F.mse_loss(predicted_velocity, target_velocity)
-            total_loss = velocity_loss
+            loss = F.mse_loss(predicted_velocity, target_velocity)
 
-        total_loss_value = float(total_loss.detach().cpu())
-        velocity_loss_value = float(velocity_loss.detach().cpu())
-        running_total_loss += total_loss_value
-        running_velocity_loss += velocity_loss_value
+        loss_value = float(loss.detach().cpu())
+        running_loss += loss_value
         running_steps += 1
-        epoch_total_loss += total_loss_value
+        epoch_loss += loss_value
         epoch_steps += 1
 
-        loss = total_loss / args.grad_accum_steps
+        scaled_loss = loss / args.grad_accum_steps
         should_step = (step + 1) % args.grad_accum_steps == 0
         step_start_time = time.time()
         clip_grad = args.clip_grad if args.clip_grad > 0 else None
         grad_norm = scaler(
-            loss,
+            scaled_loss,
             optimizer,
             clip_grad=clip_grad,
             parameters=model.parameters(),
@@ -283,10 +272,8 @@ def train_one_epoch(
             "step": step + 1,
             "total_steps": total_steps,
             "batch_size": int(clean_images.shape[0]),
-            "loss": total_loss_value,
-            "running_loss": running_total_loss / max(running_steps, 1),
-            "velocity_loss": velocity_loss_value,
-            "running_velocity_loss": running_velocity_loss / max(running_steps, 1),
+            "loss": loss_value,
+            "running_loss": running_loss / max(running_steps, 1),
             "lr": learning_rate,
             "optimizer_step": int(should_step),
             "grad_norm": "" if grad_norm is None else float(grad_norm.detach().cpu()),
@@ -295,7 +282,7 @@ def train_one_epoch(
         }
         logger.log_train(**train_fields)
 
-    return epoch_total_loss / max(epoch_steps, 1)
+    return epoch_loss / max(epoch_steps, 1)
 
 
 def log_training_info(
@@ -322,14 +309,14 @@ def log_training_info(
     logger.log_info_block(
         "GLOBAL PARAMETERS",
         {
-            "task": "auxiliary_conditioned_flow_matching_seismic_generation",
+            "task": "dim_conditioned_flow_matching_seismic_generation",
             "train_data_dir": args.train_data_dir,
-            "train_data_aux_dir": args.train_data_aux_dir,
+            "train_data_dim_dir": args.train_data_dim_dir,
             "dataset_size": len(dataset),
             "num_batches_per_epoch": len(dataloader),
             "model_arch": args.model_arch,
             "model_config": dict(model.model.config),
-            "aux_channels": dataset.dataset1[0].shape[0],
+            "dim_channels": dataset.dataset1[0].shape[0],
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -376,22 +363,21 @@ def main(args):
     logger.log_event(
         "dataset_initializing",
         train_data_dir=args.train_data_dir,
-        train_data_aux_dir=args.train_data_aux_dir,
+        train_data_dim_dir=args.train_data_dim_dir,
     )
-    dataset, train_sampler, train_loader = build_dataloader(args)
-    aux_channels = dataset.dataset1[0].shape[0]
+    dataset, train_loader = build_dataloader(args)
+    dim_channels = dataset.dataset1[0].shape[0]
     logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
-        aux_channels=int(aux_channels),
+        dim_channels=int(dim_channels),
         num_batches=len(train_loader),
-        sampler=str(train_sampler),
     )
 
     logger.log_event("model_initializing", model_arch=args.model_arch)
     model = build_dit_transformer_2d_wrapper(
         model_arch=args.model_arch,
-        in_channels=1 + aux_channels,
+        in_channels=1 + dim_channels,
         out_channels=1,
         sample_size=args.input_size,
         num_embeds_ada_norm=1,
