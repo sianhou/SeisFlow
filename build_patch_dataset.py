@@ -6,43 +6,43 @@ import numpy as np
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description=(
-            "Build single-channel seismic patch datasets for WP1. Supports slicing, "
-            "resizing, and custom square patch sizes such as 128, 256, and 512."
-        ),
+        description="Build seismic image and dimension-coordinate patch datasets from SEG-Y shots.",
         epilog=(
             "Examples:\n"
-            "  Build 256x256 patches:\n"
-            "    python scripts/build_patch_dataset.py --segy ma2+GathAP.sgy "
+            "  Build normalized 256x256 image and dimension patches:\n"
+            "    python build_patch_dataset.py --segy ma2+GathAP.sgy "
             "--patch_size 256 --overlap_size 16 --slice 0 1501 "
-            "--resize 512 512 --normalize --output_dir ./train_dataset256"
+            "--resize 512 512 --clip -2 2 --normalize "
+            "--output_dir ./dataset"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--segy",
-                        help="Input SEG-Y file used to build the patch dataset.")
+                        help="Input SEG-Y file.")
     parser.add_argument(
         "--patch_size",
         default=256,
         type=int,
-        help="Square patch size. WP1 commonly uses 128, 256, or 512.",
+        help="Square patch size.",
     )
-    parser.add_argument("--overlap_size", default=16, type=int)
-    parser.add_argument("--output_dir", default="./dataset_train")
-    parser.add_argument("--clip_vmin", default=None, type=float,
-                        help="Optional lower clipping bound applied before normalization.")
-    parser.add_argument("--clip_vmax", default=None, type=float,
-                        help="Optional upper clipping bound applied before normalization.")
+    parser.add_argument("--overlap_size", default=16, type=int,
+                        help="Overlap size between neighboring patches.")
+    parser.add_argument("--output_dir", default="./dataset",
+                        help="Output path prefix for train/valid image, dimension, and patch metadata directories.")
+    parser.add_argument("--valid", default=0.0, type=float,
+                        help="Validation split ratio by shot. Must be >= 0 and < 1.")
+    parser.add_argument("--valid_mode", default="shot", choices=["shot"],
+                        help="Validation split mode.")
+    parser.add_argument("--clip", nargs=2, default=None, type=float, metavar=("VMIN", "VMAX"),
+                        help="Amplitude clipping range applied before normalization.")
     parser.add_argument("--normalize", action="store_true",
-                        help="Normalize each saved patch independently with per_channel+abs to [-1, 1].")
-    parser.add_argument("--auxiliary_data", action="store_true",
-                        help="Save 5-channel auxiliary patches [sx, sy, rx, ry, t] instead of amplitude patches.")
+                        help="Normalize each image patch by its own maximum absolute amplitude.")
     parser.add_argument("--keep_zeros_patch", action="store_true",
-                        help="Keep patches whose amplitude channel is all zero. By default, all-zero amplitude patches are skipped.")
+                        help="Keep all-zero image patches instead of skipping them.")
     parser.add_argument("--slice", nargs=2, type=int, default=[0, 0],
-                        help="Slice range on the last dimension as two ints: start end. Use 0 0 to disable.")
+                        help="Sample-axis slice range START END. Use 0 0 to disable.")
     parser.add_argument("--resize", nargs=2, type=int, default=[0, 0],
-                        help="Resize target as two ints: height width. Use 0 0 to disable.")
+                        help="Resize each shot to HEIGHT WIDTH before patch extraction. Use 0 0 to disable.")
     return parser
 
 
@@ -55,8 +55,10 @@ def validate_args(args):
         raise ValueError("--slice values must be non-negative. Use 0 0 to disable.")
     if args.resize[0] < 0 or args.resize[1] < 0:
         raise ValueError("--resize values must be non-negative. Use 0 0 to disable.")
-    if args.clip_vmin is not None and args.clip_vmax is not None and args.clip_vmin > args.clip_vmax:
-        raise ValueError("--clip_vmin must be less than or equal to --clip_vmax.")
+    if args.clip is not None and args.clip[0] > args.clip[1]:
+        raise ValueError("--clip VMIN must be less than or equal to VMAX.")
+    if args.valid < 0 or args.valid >= 1:
+        raise ValueError("--valid must be >= 0 and < 1.")
 
 
 def build_sample_transform(args):
@@ -80,17 +82,6 @@ def build_sample_transform(args):
         return None
 
     return transforms.Compose(transform_list)
-
-
-def filter_zero_patches(patches, positions):
-    if patches.ndim != 3:
-        raise ValueError(f"Expected patches to be [N,H,W], got {patches.shape}")
-
-    keep_mask = np.any(patches != 0, axis=(1, 2))
-    filtered_patches = patches[keep_mask]
-    filtered_positions = [pos for pos, keep in zip(positions, keep_mask) if keep]
-    skipped = int((~keep_mask).sum())
-    return filtered_patches, filtered_positions, skipped
 
 
 def build_t_array(shape):
@@ -124,7 +115,7 @@ def mark_padding_invalid(patches, positions, original_shape, invalid_value=-1.0)
     return patches
 
 
-def scan_auxiliary_bounds(dataset):
+def scan_dim_bounds(dataset):
     x0 = np.inf
     x1 = -np.inf
     y0 = np.inf
@@ -147,12 +138,12 @@ def scan_auxiliary_bounds(dataset):
         t1 = max(t1, float(width - 1))
 
     if not np.isfinite([x0, x1, y0, y1, t0, t1]).all():
-        raise RuntimeError("Failed to scan auxiliary coordinate bounds.")
+        raise RuntimeError("Failed to scan dimension coordinate bounds.")
 
     return x0, x1, y0, y1, t0, t1
 
 
-def build_auxiliary_patches(
+def build_dim_patches(
         sample,
         patch_processor,
         patch_size,
@@ -214,11 +205,11 @@ def build_auxiliary_patches(
         if not np.array_equal(positions, channel_positions) or original_shape != channel_shape:
             raise RuntimeError(f"{name} patch grid does not match shot patch grid.")
 
-    auxiliary_patches = np.stack(
+    dim_patches = np.stack(
         [sx_patches, sy_patches, rx_patches, ry_patches, t_patches],
         axis=1,
     )
-    return mark_padding_invalid(auxiliary_patches, positions, original_shape)
+    return mark_padding_invalid(dim_patches, positions, original_shape)
 
 
 def normalize_patches_per_channel_abs(patches):
@@ -231,8 +222,11 @@ def normalize_patches_per_channel_abs(patches):
 
     patches_tensor = torch.from_numpy(patches).float().unsqueeze(1)  # [N,1,H,W]
     normalizer = AbsNormalize(per_channel=True)
-    normalized = normalizer(patches_tensor)
-    return normalized.squeeze(1).cpu().numpy()
+    normalized, scales = normalizer.run(patches_tensor)
+    return (
+        normalized.squeeze(1).cpu().numpy(),
+        scales[:, 0, 0, 0].cpu().numpy(),
+    )
 
 
 def clip_patches(patches, vmin=None, vmax=None):
@@ -251,8 +245,46 @@ def clip_patches(patches, vmin=None, vmax=None):
     return clipped.squeeze(1).cpu().numpy()
 
 
-def build_aux_output_dir(output_dir):
-    return f"{output_dir.rstrip(os.sep)}_aux"
+def build_output_dirs(output_dir):
+    output_prefix = output_dir.rstrip(os.sep)
+    return (
+        f"{output_prefix}/train",
+        f"{output_prefix}/dim_train",
+        f"{output_prefix}/train_aux",
+        f"{output_prefix}/valid",
+        f"{output_prefix}/dim_valid",
+        f"{output_prefix}/valid_aux",
+    )
+
+
+def save_patch_metadata(
+        output_file,
+        positions,
+        original_shape,
+        patch_scales,
+):
+    np.savez(
+        output_file,
+        positions=np.asarray(positions, dtype=np.int64),
+        original_shape=np.asarray(original_shape, dtype=np.int64),
+        patch_scales=np.asarray(patch_scales, dtype=np.float32),
+    )
+
+
+def build_split_indices(num_shots, valid_ratio, valid_mode):
+    if valid_mode != "shot":
+        raise ValueError(f"Unsupported valid_mode: {valid_mode}")
+    if valid_ratio <= 0:
+        return set(range(num_shots)), set()
+    if num_shots < 2:
+        raise ValueError("--valid requires at least 2 shots.")
+
+    valid_count = int(round(num_shots * valid_ratio))
+    valid_count = max(1, min(valid_count, num_shots - 1))
+    valid_indices = np.floor((np.arange(valid_count) + 0.5) * num_shots / valid_count).astype(int)
+    valid_indices = set(valid_indices.tolist())
+    train_indices = set(range(num_shots)) - valid_indices
+    return train_indices, valid_indices
 
 
 def build_dataset(args):
@@ -260,21 +292,36 @@ def build_dataset(args):
     from core.patching import NumpyPatchProcessor
 
     validate_args(args)
-    os.makedirs(args.output_dir, exist_ok=True)
-    aux_output_dir = build_aux_output_dir(args.output_dir)
-    if args.auxiliary_data:
-        os.makedirs(aux_output_dir, exist_ok=True)
+    (
+        train_output_dir,
+        train_dim_output_dir,
+        train_aux_output_dir,
+        valid_output_dir,
+        valid_dim_output_dir,
+        valid_aux_output_dir,
+    ) = build_output_dirs(args.output_dir)
+    os.makedirs(train_output_dir, exist_ok=True)
+    os.makedirs(train_dim_output_dir, exist_ok=True)
+    os.makedirs(train_aux_output_dir, exist_ok=True)
+    if args.valid > 0:
+        os.makedirs(valid_output_dir, exist_ok=True)
+        os.makedirs(valid_dim_output_dir, exist_ok=True)
+        os.makedirs(valid_aux_output_dir, exist_ok=True)
 
     sample_transform = build_sample_transform(args)
     dataset = SegyDataset(args.segy, transform=sample_transform)
-    auxiliary_bounds = None
-    if args.auxiliary_data:
-        auxiliary_bounds = scan_auxiliary_bounds(dataset)
-        x0, x1, y0, y1, t0, t1 = auxiliary_bounds
+    train_indices, valid_indices = build_split_indices(len(dataset), args.valid, args.valid_mode)
+    if args.valid > 0:
         print(
-            "Auxiliary coordinate bounds: "
-            f"x=({x0}, {x1}), y=({y0}, {y1}), t=({t0}, {t1})"
+            f"Split shots with mode={args.valid_mode}: "
+            f"train={len(train_indices)}, valid={len(valid_indices)}"
         )
+    dim_bounds = scan_dim_bounds(dataset)
+    x0, x1, y0, y1, t0, t1 = dim_bounds
+    print(
+        "Dimension coordinate bounds: "
+        f"x=({x0}, {x1}), y=({y0}, {y1}), t=({t0}, {t1})"
+    )
 
     patch_size = (args.patch_size, args.patch_size)
     overlap_size = (args.overlap_size, args.overlap_size)
@@ -289,51 +336,68 @@ def build_dataset(args):
             overlap=overlap_size,
         )
 
-        if args.auxiliary_data:
-            auxiliary_patches = build_auxiliary_patches(
-                sample,
-                patch_processor=patch_processor,
-                patch_size=patch_size,
-                overlap=overlap_size,
-                positions=positions,
-                original_shape=original_shape,
-                x0=auxiliary_bounds[0],
-                x1=auxiliary_bounds[1],
-                y0=auxiliary_bounds[2],
-                y1=auxiliary_bounds[3],
-                t0=auxiliary_bounds[4],
-                t1=auxiliary_bounds[5],
-            )
+        dim_patches = build_dim_patches(
+            sample,
+            patch_processor=patch_processor,
+            patch_size=patch_size,
+            overlap=overlap_size,
+            positions=positions,
+            original_shape=original_shape,
+            x0=x0,
+            x1=x1,
+            y0=y0,
+            y1=y1,
+            t0=t0,
+            t1=t1,
+        )
 
         if args.keep_zeros_patch:
             skipped_zero_patches = 0
         else:
             keep_mask = np.any(patches != 0, axis=(1, 2))
             patches = patches[keep_mask]
-            positions = [pos for pos, keep in zip(positions, keep_mask) if keep]
-            if args.auxiliary_data:
-                auxiliary_patches = auxiliary_patches[keep_mask]
+            positions = positions[keep_mask]
+            dim_patches = dim_patches[keep_mask]
             skipped_zero_patches = int((~keep_mask).sum())
 
         if len(patches) == 0:
             print(f"Skipped shot {i:04d}: all patches are zero")
             continue
 
-        if args.clip_vmin is not None or args.clip_vmax is not None:
-            patches = clip_patches(patches, vmin=args.clip_vmin, vmax=args.clip_vmax)
+        if args.clip is not None:
+            patches = clip_patches(patches, vmin=args.clip[0], vmax=args.clip[1])
 
+        patch_scales = np.ones((len(patches),), dtype=np.float32)
         if args.normalize:
-            patches = normalize_patches_per_channel_abs(patches)
+            patches, patch_scales = normalize_patches_per_channel_abs(patches)
 
-        output_file = os.path.join(args.output_dir, f"patches_{i:04d}.npy")
+        if i in valid_indices:
+            split_name = "valid"
+            output_dir = valid_output_dir
+            dim_output_dir = valid_dim_output_dir
+            aux_output_dir = valid_aux_output_dir
+        else:
+            split_name = "train"
+            output_dir = train_output_dir
+            dim_output_dir = train_dim_output_dir
+            aux_output_dir = train_aux_output_dir
+
+        output_file = os.path.join(output_dir, f"patches_{i:04d}.npy")
         np.save(output_file, patches)
 
-        if args.auxiliary_data:
-            aux_output_file = os.path.join(aux_output_dir, f"patches_{i:04d}.npy")
-            np.save(aux_output_file, auxiliary_patches)
+        dim_output_file = os.path.join(dim_output_dir, f"patches_{i:04d}.npy")
+        np.save(dim_output_file, dim_patches)
+
+        aux_output_file = os.path.join(aux_output_dir, f"patches_{i:04d}.npz")
+        save_patch_metadata(
+            aux_output_file,
+            positions=positions,
+            original_shape=original_shape,
+            patch_scales=patch_scales,
+        )
 
         print(
-            f"Saved {output_file} with {len(patches)} patches "
+            f"Saved {split_name} {output_file} with {len(patches)} patches "
             f"(skipped zero patches: {skipped_zero_patches})"
         )
 
