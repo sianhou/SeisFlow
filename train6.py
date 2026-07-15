@@ -33,7 +33,7 @@ def build_parser():
     )
     parser.add_argument(
         "--train_data_dim_dir",
-        default="./dataset/dim_train",
+        default="./dataset/train_dim",
         help="Directory containing training dimension-coordinate patch NPY files.",
     )
     parser.add_argument(

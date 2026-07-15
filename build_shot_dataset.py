@@ -1,48 +1,86 @@
 import argparse
 import os
+import tempfile
 
 import numpy as np
 
 
+class ArgumentFormatter(
+    argparse.ArgumentDefaultsHelpFormatter,
+    argparse.RawDescriptionHelpFormatter,
+):
+    pass
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Build seismic image and dimension-coordinate patch datasets from SEG-Y shots.",
+        description=(
+            "Build shot-level seismic image patches, coordinate-condition patches, "
+            "and reconstruction metadata from a SEG-Y file."
+        ),
         epilog=(
             "Examples:\n"
-            "  Build normalized 256x256 image and dimension patches:\n"
-            "    python build_patch_dataset.py --segy ma2+GathAP.sgy "
+            "  Build normalized 256x256 training patches:\n"
+            "    python build_shot_dataset.py --segy ma2+GathAP.sgy "
             "--patch_size 256 --overlap_size 16 --slice 0 1501 "
             "--resize 512 512 --clip -2 2 --normalize "
+            "--output_dir ./dataset\n"
+            "\n"
+            "  Build train/valid splits with grouped random validation shots:\n"
+            "    python build_shot_dataset.py --segy ma2+GathAP.sgy "
+            "--valid 0.2 --valid_mode group_random --seed 42 "
             "--output_dir ./dataset"
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=ArgumentFormatter,
     )
-    parser.add_argument("--segy",
+    parser.add_argument("--segy", required=True, default=argparse.SUPPRESS,
                         help="Input SEG-Y file.")
     parser.add_argument(
         "--patch_size",
         default=256,
         type=int,
-        help="Square patch size.",
+        help="Height and width of each square patch.",
     )
     parser.add_argument("--overlap_size", default=16, type=int,
-                        help="Overlap size between neighboring patches.")
+                        help="Number of pixels shared by neighboring patches along both axes.")
     parser.add_argument("--output_dir", default="./dataset",
-                        help="Output path prefix for train/valid image, dimension, and patch metadata directories.")
+                        help=(
+                            "Output root. The script writes train, train_dim, train_aux, "
+                            "and, when --valid > 0, valid, valid_dim, valid_aux."
+                        ))
     parser.add_argument("--valid", default=0.0, type=float,
-                        help="Validation split ratio by shot. Must be >= 0 and < 1.")
-    parser.add_argument("--valid_mode", default="shot", choices=["shot"],
-                        help="Validation split mode.")
+                        help="Validation split ratio over shots. Must satisfy 0 <= value < 1.")
+    parser.add_argument(
+        "--valid_mode",
+        default="uniform",
+        choices=[
+            "uniform",
+            "random",
+            "group_random",
+        ],
+        help=(
+            "How validation shots are selected: uniform selects evenly spaced shots; "
+            "random samples validation shots globally; group_random splits all shots "
+            "into uniform groups and samples one shot per group."
+        ),
+    )
+    parser.add_argument("--seed", default=0, type=int,
+                        help="Random seed used by random and group_random validation modes.")
     parser.add_argument("--clip", nargs=2, default=None, type=float, metavar=("VMIN", "VMAX"),
-                        help="Amplitude clipping range applied before normalization.")
+                        help="Clip image-patch amplitudes to [VMIN, VMAX] before normalization.")
     parser.add_argument("--normalize", action="store_true",
-                        help="Normalize each image patch by its own maximum absolute amplitude.")
+                        help=(
+                            "Normalize each image patch by its maximum absolute amplitude. "
+                            "The per-patch scale is saved in the aux metadata."
+                        ))
     parser.add_argument("--keep_zeros_patch", action="store_true",
-                        help="Keep all-zero image patches instead of skipping them.")
-    parser.add_argument("--slice", nargs=2, type=int, default=[0, 0],
-                        help="Sample-axis slice range START END. Use 0 0 to disable.")
-    parser.add_argument("--resize", nargs=2, type=int, default=[0, 0],
-                        help="Resize each shot to HEIGHT WIDTH before patch extraction. Use 0 0 to disable.")
+                        help="Keep all-zero image patches; by default they are skipped.")
+    parser.add_argument("--slice", nargs=2, type=int, default=[0, 0], metavar=("START", "END"),
+                        help="Slice the sample/time axis as [START, END) before patch extraction. Use 0 0 to disable.")
+    parser.add_argument("--resize", nargs=2, type=int, default=[0, 0], metavar=("HEIGHT", "WIDTH"),
+                        help="Resize each shot to HEIGHT x WIDTH before patch extraction. Use 0 0 to disable.")
+    parser.add_argument("--no_shot_plot", action="store_true",
+                        help="Do not save the default generated train/valid shot plot under output_dir.")
     return parser
 
 
@@ -53,8 +91,12 @@ def validate_args(args):
         raise ValueError("--overlap_size must be in [0, patch_size).")
     if args.slice[0] < 0 or args.slice[1] < 0:
         raise ValueError("--slice values must be non-negative. Use 0 0 to disable.")
+    if args.slice != [0, 0] and args.slice[0] >= args.slice[1]:
+        raise ValueError("--slice must be 0 0 or satisfy START < END.")
     if args.resize[0] < 0 or args.resize[1] < 0:
         raise ValueError("--resize values must be non-negative. Use 0 0 to disable.")
+    if (args.resize[0] == 0) != (args.resize[1] == 0):
+        raise ValueError("--resize must set both HEIGHT and WIDTH, or use 0 0 to disable.")
     if args.clip is not None and args.clip[0] > args.clip[1]:
         raise ValueError("--clip VMIN must be less than or equal to VMAX.")
     if args.valid < 0 or args.valid >= 1:
@@ -249,10 +291,10 @@ def build_output_dirs(output_dir):
     output_prefix = output_dir.rstrip(os.sep)
     return (
         f"{output_prefix}/train",
-        f"{output_prefix}/dim_train",
+        f"{output_prefix}/train_dim",
         f"{output_prefix}/train_aux",
         f"{output_prefix}/valid",
-        f"{output_prefix}/dim_valid",
+        f"{output_prefix}/valid_dim",
         f"{output_prefix}/valid_aux",
     )
 
@@ -271,8 +313,127 @@ def save_patch_metadata(
     )
 
 
-def build_split_indices(num_shots, valid_ratio, valid_mode):
-    if valid_mode != "shot":
+def plot_shot_presence(present_shot_keys, missing_shot_keys, output_file):
+    os.environ.setdefault(
+        "MPLCONFIGDIR",
+        os.path.join(tempfile.gettempdir(), "seisflow_matplotlib"),
+    )
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    present_numbers = np.unique(np.asarray(present_shot_keys, dtype=np.int64))
+    missing_numbers = np.unique(np.asarray(missing_shot_keys, dtype=np.int64))
+    shot_numbers = np.unique(np.concatenate([present_numbers, missing_numbers]))
+    if shot_numbers.size == 0:
+        raise ValueError("Cannot plot shot presence without any generated shots.")
+
+    first_shot = int(shot_numbers.min())
+    last_shot = int(shot_numbers.max())
+    x = np.arange(first_shot, last_shot + 1, dtype=np.int64)
+    present_x = np.intersect1d(x, present_numbers, assume_unique=True)
+    missing_x = np.intersect1d(x, missing_numbers, assume_unique=True)
+    present_count = int(present_x.size)
+    missing_count = int(missing_x.size)
+    total_count = present_count + missing_count
+    missing_ratio = missing_count / total_count if total_count else 0.0
+
+    fig_width = min(18.0, max(10.0, total_count / 80.0))
+    fig, ax = plt.subplots(figsize=(fig_width, 4.2))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+    ax.axhspan(-0.12, 1.12, color="#F1F3F5", zorder=0)
+
+    if present_x.size:
+        ax.vlines(
+            present_x,
+            0.0,
+            1.0,
+            color="#D32F2F",
+            alpha=0.45,
+            linewidth=0.9,
+            zorder=2,
+        )
+        ax.scatter(
+            present_x,
+            np.ones_like(present_x),
+            s=28,
+            facecolors="white",
+            edgecolors="#D32F2F",
+            linewidths=1.2,
+            label=f"train / present ({present_count})",
+            zorder=3,
+        )
+
+    if missing_x.size:
+        ax.scatter(
+            missing_x,
+            np.zeros_like(missing_x),
+            s=30,
+            color="#1976D2",
+            marker="x",
+            linewidths=1.2,
+            label=f"valid / missing ({missing_count})",
+            zorder=4,
+        )
+
+    ax.set_xlabel("shot number")
+    ax.set_ylabel("status")
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["missing", "present"])
+    ax.set_ylim(-0.45, 1.45)
+    ax.set_xlim(first_shot - 0.5, last_shot + 0.5)
+    ax.set_title("Generated Train/Valid Shot Distribution")
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True))
+    ax.grid(True, axis="x", color="#B0BEC5", alpha=0.35, linewidth=0.8)
+    ax.grid(True, axis="y", color="#CFD8DC", alpha=0.75, linewidth=0.8)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#90A4AE")
+    ax.spines["bottom"].set_color("#90A4AE")
+    ax.tick_params(colors="#37474F")
+    ax.legend(loc="upper right", frameon=True, framealpha=0.95, edgecolor="#CFD8DC")
+    ax.text(
+        0.01,
+        0.96,
+        (
+            f"range: {first_shot}..{last_shot}\n"
+            f"train/present: {present_count} / {total_count}\n"
+            f"valid/missing: {missing_count} ({missing_ratio:.1%})"
+        ),
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        color="#263238",
+        bbox={
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "white",
+            "edgecolor": "#CFD8DC",
+            "alpha": 0.95,
+        },
+    )
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=200)
+    plt.close(fig)
+
+    return {
+        "first_shot": first_shot,
+        "last_shot": last_shot,
+        "present_count": present_count,
+        "missing_count": missing_count,
+        "total_count": total_count,
+    }
+
+
+def select_uniform_indices(num_items, count):
+    return np.floor((np.arange(count) + 0.5) * num_items / count).astype(int)
+
+
+def build_split_indices(num_shots, valid_ratio, valid_mode, seed=0):
+    if valid_mode not in {"uniform", "random", "group_random"}:
         raise ValueError(f"Unsupported valid_mode: {valid_mode}")
     if valid_ratio <= 0:
         return set(range(num_shots)), set()
@@ -281,7 +442,20 @@ def build_split_indices(num_shots, valid_ratio, valid_mode):
 
     valid_count = int(round(num_shots * valid_ratio))
     valid_count = max(1, min(valid_count, num_shots - 1))
-    valid_indices = np.floor((np.arange(valid_count) + 0.5) * num_shots / valid_count).astype(int)
+
+    if valid_mode == "uniform":
+        valid_indices = select_uniform_indices(num_shots, valid_count)
+    elif valid_mode == "random":
+        rng = np.random.default_rng(seed)
+        valid_indices = rng.choice(num_shots, size=valid_count, replace=False)
+    else:
+        rng = np.random.default_rng(seed)
+        groups = np.array_split(np.arange(num_shots), valid_count)
+        valid_indices = np.asarray(
+            [rng.choice(group) for group in groups if len(group) > 0],
+            dtype=np.int64,
+        )
+
     valid_indices = set(valid_indices.tolist())
     train_indices = set(range(num_shots)) - valid_indices
     return train_indices, valid_indices
@@ -310,7 +484,12 @@ def build_dataset(args):
 
     sample_transform = build_sample_transform(args)
     dataset = SegyDataset(args.segy, transform=sample_transform)
-    train_indices, valid_indices = build_split_indices(len(dataset), args.valid, args.valid_mode)
+    train_indices, valid_indices = build_split_indices(
+        len(dataset),
+        args.valid,
+        args.valid_mode,
+        seed=args.seed,
+    )
     if args.valid > 0:
         print(
             f"Split shots with mode={args.valid_mode}: "
@@ -326,9 +505,12 @@ def build_dataset(args):
     patch_size = (args.patch_size, args.patch_size)
     overlap_size = (args.overlap_size, args.overlap_size)
     patch_processor = NumpyPatchProcessor()
+    train_shot_numbers = []
+    valid_shot_numbers = []
 
     for i in range(len(dataset)):
         sample = dataset[i]
+        shot_number = dataset.shot_keys[i]
         shot = sample[0].numpy()
         patches, positions, original_shape = patch_processor.extract_overlapping_patches_2d(
             shot,
@@ -396,9 +578,28 @@ def build_dataset(args):
             patch_scales=patch_scales,
         )
 
+        if split_name == "valid":
+            valid_shot_numbers.append(shot_number)
+        else:
+            train_shot_numbers.append(shot_number)
+
         print(
             f"Saved {split_name} {output_file} with {len(patches)} patches "
             f"(skipped zero patches: {skipped_zero_patches})"
+        )
+
+    if not args.no_shot_plot:
+        shot_plot_file = os.path.join(args.output_dir.rstrip(os.sep), "shot_presence.png")
+        shot_plot_stats = plot_shot_presence(
+            train_shot_numbers,
+            valid_shot_numbers,
+            shot_plot_file,
+        )
+        print(
+            f"Saved shot presence plot {shot_plot_file} "
+            f"(train/present={shot_plot_stats['present_count']}, "
+            f"valid/missing={shot_plot_stats['missing_count']}, "
+            f"range={shot_plot_stats['first_shot']}..{shot_plot_stats['last_shot']})"
         )
 
 

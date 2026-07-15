@@ -5,7 +5,7 @@ set -u
 PYTHON_PATH="/Users/housian/Workplaces/ucas/.venv/SeisFlow/"
 SF_PATH="/Users/housian/Workplaces/SeisFlow"
 
-${PYTHON_PATH}/bin/python3.13 ${SF_PATH}/scripts/build_patch_dataset.py \
+${PYTHON_PATH}/bin/python3.13 ${SF_PATH}/build_shot_dataset.py \
 	--segy /Users/housian/Workplaces/SeisFlow/ma2+GathAP.sgy \
 	--patch_size 256 \
 	--overlap_size 240 \
