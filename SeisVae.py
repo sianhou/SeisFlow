@@ -1,7 +1,5 @@
 import argparse
-import csv
 import gc
-import os
 import time
 from pathlib import Path
 
@@ -14,7 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from core.dataset import PatchDataset
-from core.logging.logger import DistributedSimpleLogger2
+from core.logging.logger import build_dist_logger
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from models.wrapper import AutoencoderKLWrapper, build_autoencoder_kl_wrapper
 from training import distributed_mode
@@ -39,7 +37,7 @@ def build_parser():
             "  Valid:\n"
             "    python SeisVae.py valid --ckpt ./output_seis_vae/run/checkpoint_epoch_00500 "
             "--train_data_dir ./dataset256/valid --output_dir ./output_seis_vae/valid "
-            "--batch_size 16 --device cuda\n"
+            "--batch_size 16 --clip_recon -1 1 --plot_clim -1 1 --device cuda\n"
         ),
         formatter_class=RawDefaultsHelpFormatter,
     )
@@ -66,16 +64,32 @@ def build_parser():
         help="Checkpoint directory. In train mode it resumes training; in valid mode it is required.",
     )
     parser.add_argument(
-        "--valid_num_samples",
-        default=None,
-        type=int,
-        help="Optional maximum number of validation patches to process. Defaults to all patches.",
-    )
-    parser.add_argument(
         "--psnr_data_range",
         default=2.0,
         type=float,
         help="PSNR data range. Use <= 0 to compute each sample's max-minus-min range.",
+    )
+    parser.add_argument(
+        "--plot_clim",
+        nargs=2,
+        default=None,
+        type=float,
+        metavar=("VMIN", "VMAX"),
+        help=(
+            "Optional fixed color scale for validation input/output/diff plots. "
+            "When set, all three panels use this vmin/vmax."
+        ),
+    )
+    parser.add_argument(
+        "--clip_recon",
+        nargs=2,
+        default=None,
+        type=float,
+        metavar=("VMIN", "VMAX"),
+        help=(
+            "Optional clipping range applied to reconstructed validation data "
+            "before PSNR and plotting. Useful when training data is bounded, e.g. -1 1."
+        ),
     )
     parser.add_argument(
         "--batch_size",
@@ -286,17 +300,32 @@ def compute_sample_psnr(target, reconstruction, data_range):
     return 20.0 * np.log10(sample_range) - 10.0 * np.log10(max(mse, 1e-12))
 
 
-def plot_reconstruction_triplet(input_image, output_image, diff_image, output_path, psnr):
-    seismic_vlim = max(
-        float(np.max(np.abs(input_image))),
-        float(np.max(np.abs(output_image))),
-        1e-6,
-    )
-    diff_vlim = max(float(np.max(np.abs(diff_image))), 1e-6)
+def plot_reconstruction_triplet(
+        input_image,
+        output_image,
+        diff_image,
+        output_path,
+        psnr,
+        plot_clim=None,
+):
+    if plot_clim is None:
+        seismic_vlim = max(
+            float(np.max(np.abs(input_image))),
+            float(np.max(np.abs(output_image))),
+            1e-6,
+        )
+        diff_vlim = max(float(np.max(np.abs(diff_image))), 1e-6)
+        input_vmin, input_vmax = -seismic_vlim, seismic_vlim
+        output_vmin, output_vmax = -seismic_vlim, seismic_vlim
+        diff_vmin, diff_vmax = -diff_vlim, diff_vlim
+    else:
+        input_vmin, input_vmax = plot_clim
+        output_vmin, output_vmax = plot_clim
+        diff_vmin, diff_vmax = plot_clim
     panels = [
-        (input_image, "input", -seismic_vlim, seismic_vlim),
-        (output_image, "output", -seismic_vlim, seismic_vlim),
-        (diff_image, "diff", -diff_vlim, diff_vlim),
+        (input_image, "input", input_vmin, input_vmax),
+        (output_image, "output", output_vmin, output_vmax),
+        (diff_image, "diff", diff_vmin, diff_vmax),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
@@ -355,31 +384,66 @@ def run_valid(args):
         raise ValueError("--ckpt is required in valid mode.")
     if args.batch_size <= 0:
         raise ValueError("--batch_size must be positive.")
-    if args.valid_num_samples is not None and args.valid_num_samples <= 0:
-        raise ValueError("--valid_num_samples must be positive when provided.")
+    if args.plot_clim is not None and args.plot_clim[0] >= args.plot_clim[1]:
+        raise ValueError("--plot_clim VMIN must be smaller than VMAX.")
+    if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
+        raise ValueError("--clip_recon VMIN must be smaller than VMAX.")
 
-    output_dir = Path(args.output_dir)
+    logger = build_dist_logger(
+        args,
+        log_id=args.log_id or ".",
+        distributed=False,
+        rank=0,
+        world_size=1,
+        local_rank=0,
+        console=args.log_console,
+        logs=[
+            "sample",
+            "batch_index",
+            "psnr",
+            "reconstruction_png",
+            "latent_png",
+        ],
+    )
+    output_dir = logger.run_dir
+
     device = torch.device(args.device)
     set_random_seed(args.seed)
 
+    logger.log_event("dataset_initializing", train_data_dir=args.train_data_dir)
     dataset, dataloader = build_valid_dataloader(args)
+    logger.log_event(
+        "dataset_initialized",
+        dataset_size=len(dataset),
+        num_batches=len(dataloader),
+    )
+    logger.log_event("model_loading", checkpoint=args.ckpt)
     model = AutoencoderKLWrapper.from_pretrained(args.ckpt, device=device)
     model.eval()
+    logger.log_event("model_loaded", checkpoint=args.ckpt)
 
-    rows = []
+    psnr_values = []
     sample_index = 0
-    max_samples = args.valid_num_samples
-    metrics_path = output_dir / "metrics.csv"
+    scanned_batches = 0
+    logger.log_event(
+        "validation_started",
+        checkpoint=args.ckpt,
+        train_data_dir=args.train_data_dir,
+        dataset_size=len(dataset),
+        batch_size=args.batch_size,
+        device=device,
+        clip_recon=args.clip_recon,
+        plot_clim=args.plot_clim,
+    )
 
     with torch.inference_mode():
-        for batch in dataloader:
-            if max_samples is not None and sample_index >= max_samples:
-                break
+        for batch_index, batch in enumerate(dataloader):
+
+            logger.reset_header()
+
+            scanned_batches = batch_index + 1
 
             batch = batch.to(device, non_blocking=True)
-            if max_samples is not None:
-                remaining = max_samples - sample_index
-                batch = batch[:remaining]
 
             expected_channels = int(model.model.config.in_channels)
             sample_size = model.model.config.sample_size
@@ -406,6 +470,12 @@ def run_valid(args):
             for batch_offset in range(input_batch.shape[0]):
                 input_image = input_batch[batch_offset, 0]
                 output_image = recon_batch[batch_offset, 0]
+                if args.clip_recon is not None:
+                    output_image = np.clip(
+                        output_image,
+                        args.clip_recon[0],
+                        args.clip_recon[1],
+                    )
                 diff_image = output_image - input_image
                 psnr = float(
                     compute_sample_psnr(
@@ -423,45 +493,55 @@ def run_valid(args):
                     diff_image=diff_image,
                     output_path=recon_path,
                     psnr=psnr,
+                    plot_clim=args.plot_clim,
                 )
                 plot_latent_channels(latent_batch[batch_offset], latent_path)
-                rows.append(
-                    {
-                        "sample": sample_index,
-                        "psnr": psnr,
-                        "reconstruction_png": recon_path.name,
-                        "latent_png": latent_path.name,
-                    }
+                psnr_values.append(psnr)
+                logger.log_valid(
+                    sample=sample_index,
+                    batch_index=batch_index,
+                    psnr=psnr,
+                    reconstruction_png=recon_path.name,
+                    latent_png=latent_path.name,
                 )
                 sample_index += 1
 
-    with metrics_path.open("w", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["sample", "psnr", "reconstruction_png", "latent_png"],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
-    mean_psnr = float(np.mean([row["psnr"] for row in rows])) if rows else float("nan")
+    mean_psnr = float(np.mean(psnr_values)) if psnr_values else float("nan")
+    min_psnr = float(np.min(psnr_values)) if psnr_values else float("nan")
+    max_psnr = float(np.max(psnr_values)) if psnr_values else float("nan")
+    std_psnr = float(np.std(psnr_values)) if psnr_values else float("nan")
     summary_path = output_dir / "summary.txt"
-    summary_path.write_text(
-        "\n".join(
-            [
-                f"checkpoint: {args.ckpt}",
-                f"train_data_dir: {args.train_data_dir}",
-                f"num_samples: {len(rows)}",
-                f"mean_psnr: {mean_psnr:.6f}",
-                f"metrics: {metrics_path.name}",
-            ]
-        )
-        + "\n"
+    summary_lines = [
+        f"checkpoint: {args.ckpt}",
+        f"train_data_dir: {args.train_data_dir}",
+        f"output_dir: {output_dir}",
+        f"device: {device}",
+        f"batch_size: {args.batch_size}",
+        f"dataset_size: {len(dataset)}",
+        f"scanned_batches: {scanned_batches}",
+        f"num_samples: {len(psnr_values)}",
+        f"psnr_data_range: {args.psnr_data_range}",
+        f"clip_recon: {args.clip_recon}",
+        f"plot_clim: {args.plot_clim}",
+        f"mean_psnr: {mean_psnr:.6f}",
+        f"std_psnr: {std_psnr:.6f}",
+        f"min_psnr: {min_psnr:.6f}",
+        f"max_psnr: {max_psnr:.6f}",
+        f"log_file: {logger.log_file}",
+    ]
+    summary_path.write_text("\n".join(summary_lines) + "\n")
+
+    logger.log_event(
+        "validation_finished",
+        output_dir=output_dir,
+        num_samples=len(psnr_values),
+        mean_psnr=mean_psnr,
+        std_psnr=std_psnr,
+        min_psnr=min_psnr,
+        max_psnr=max_psnr,
+        summary=str(summary_path),
     )
-    print(
-        f"[valid] Saved {len(rows)} samples to {output_dir}. "
-        f"mean_psnr={mean_psnr:.3f} dB",
-        flush=True,
-    )
+    logger.close()
 
 
 def train_one_epoch(
@@ -610,24 +690,7 @@ def log_training_info(
 def run_train(args):
     distributed_mode.init_distributed_mode(args)
 
-    logger = DistributedSimpleLogger2(
-        output_dir=args.output_dir,
-        log_id=args.log_id,
-        distributed=args.distributed,
-        rank=getattr(args, "rank", 0),
-        world_size=getattr(args, "world_size", 1),
-        local_rank=getattr(args, "gpu", 0),
-        overwrite=True,
-        console=args.log_console and distributed_mode.get_rank() == 0,
-    )
-    args.log_id = logger.log_id
-    logger.log_event(
-        "script_started",
-        job_dir=os.path.dirname(os.path.realpath(__file__)),
-        log_file=logger.log_file,
-    )
-    logger.log_node_info()
-    logger.log_info_block("ARGPARSE PARAMETERS", args)
+    logger = build_dist_logger(args, log_node_info=True)
 
     device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()

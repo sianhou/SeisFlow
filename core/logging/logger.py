@@ -319,6 +319,9 @@ class SimpleLogger2(RunLoggerBase):
     def log_valid(self, prefix: str = "V", **fields: Any):
         self.log(prefix=prefix, **fields)
 
+    def reset_header(self):
+        self._header = []
+
     def log_system_info(
         self,
         title: str = "SYSTEM INFORMATION",
@@ -994,6 +997,63 @@ class DistributedSimpleLogger2(SimpleLogger2):
 
     def log_node_info(self, title: str = "NODE INFORMATION"):
         self.log_info_block(title, self.node_info)
+
+
+def build_dist_logger(
+        args,
+        *,
+        log_id=None,
+        distributed=None,
+        rank=None,
+        world_size=None,
+        local_rank=None,
+        console=None,
+        logs=None,
+        log_node_info=False,
+        job_file=None,
+):
+    if distributed is None:
+        distributed = getattr(args, "distributed", False)
+    if rank is None:
+        rank = getattr(args, "rank", 0)
+    if world_size is None:
+        world_size = getattr(args, "world_size", 1)
+    if local_rank is None:
+        local_rank = getattr(args, "gpu", 0)
+    if console is None:
+        log_console = getattr(args, "log_console", False)
+        if distributed:
+            if dist.is_available() and dist.is_initialized():
+                console = log_console and dist.get_rank() == 0
+            else:
+                console = log_console and int(rank) == 0
+        else:
+            console = log_console
+
+    logger = DistributedSimpleLogger2(
+        output_dir=args.output_dir,
+        log_id=getattr(args, "log_id", None) if log_id is None else log_id,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+        local_rank=local_rank,
+        overwrite=True,
+        console=console,
+        logs=logs,
+    )
+    if hasattr(args, "log_id"):
+        args.log_id = logger.log_id
+
+    job_path = job_file or (sys.argv[0] if sys.argv else __file__)
+    logger.log_event(
+        "script_started",
+        job_dir=os.path.dirname(os.path.realpath(job_path)),
+        log_file=logger.log_file,
+    )
+    if log_node_info:
+        logger.log_node_info()
+    logger.log_info_block("ARGPARSE PARAMETERS", args)
+    return logger
 
 
 if __name__ == "__main__":
