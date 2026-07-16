@@ -11,6 +11,7 @@ from core.logging.logger import build_dist_logger
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
 from models.wrapper import (
+    AutoencoderKLWrapper,
     DIT_TRANSFORMER_2D_CONFIGS,
     DiTTransformer2DWrapper,
     build_dit_transformer_2d_wrapper,
@@ -18,12 +19,28 @@ from models.wrapper import (
 from training import distributed_mode
 
 
+class RawDefaultsHelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter,
+    argparse.RawDescriptionHelpFormatter,
+):
+    pass
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Train a conditional flow-matching model from noise to seismic patches with dimension coordinates."
+            "Train a dimension-conditioned flow-matching model in VAE latent space."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "Example:\n"
+            "  python SeisVaeDimRecon.py "
+            "--ckpt_vae ./output_seis_vae/run/checkpoint_epoch_00100 "
+            "--train_data_dir ./dataset256/train "
+            "--train_data_dim_dir ./dataset256/train_dim "
+            "--output_dir ./output_seis_vae_dim_recon "
+            "--model_arch DiT_T_4 --batch_size 32 --num_epochs 1000 --device cuda\n"
+        ),
+        formatter_class=RawDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--train_data_dir",
@@ -48,14 +65,19 @@ def build_parser():
     )
     parser.add_argument(
         "--input_size",
-        default=64,
+        default=256,
         type=int,
-        help="Height and width of the square training patches.",
+        help="Deprecated. DiT sample size is inferred from the VAE latent shape.",
     )
     parser.add_argument(
         "--ckpt",
         default=None,
-        help="Optional checkpoint directory saved by a previous train6.py run.",
+        help="Optional checkpoint directory saved by a previous SeisVaeDimRecon.py run.",
+    )
+    parser.add_argument(
+        "--ckpt_vae",
+        required=True,
+        help="VAE checkpoint directory saved by SeisVae.py/train_seismic_vae.py.",
     )
     parser.add_argument(
         "--batch_size",
@@ -189,8 +211,41 @@ def build_dataloader(args):
     return dataset, dataloader
 
 
+def load_vae_model(args, device, logger):
+    checkpoint_dir = Path(args.ckpt_vae)
+    if not checkpoint_dir.is_dir():
+        raise FileNotFoundError(f"--ckpt_vae must be a VAE checkpoint directory, got {checkpoint_dir}.")
+
+    logger.log_event("vae_loading", checkpoint=str(checkpoint_dir))
+    vae = AutoencoderKLWrapper.from_pretrained(checkpoint_dir, device=device)
+    vae.eval()
+    vae.requires_grad_(False)
+    logger.log_event(
+        "vae_loaded",
+        checkpoint=str(checkpoint_dir),
+        input_channels=int(vae.model.config.in_channels),
+        latent_channels=int(vae.model.config.latent_channels),
+        sample_size=vae.model.config.sample_size,
+        scaling_factor=vae.model.config.scaling_factor,
+    )
+    return vae
+
+
+def encode_vae_latents(vae, images):
+    posterior = vae.model.encode(images).latent_dist
+    return posterior.mode()
+
+
+def infer_vae_latent_shape(vae, dataset, device):
+    sample = dataset.dataset0[0].unsqueeze(0).to(device)
+    with torch.inference_mode():
+        latents = encode_vae_latents(vae, sample)
+    return tuple(int(value) for value in latents.shape[1:])
+
+
 def train_one_epoch(
         model,
+        vae,
         dataloader,
         optimizer,
         scaler,
@@ -218,30 +273,39 @@ def train_one_epoch(
         clean_images, conditioning = batch
         clean_images = clean_images.to(device, non_blocking=True)
         conditioning = conditioning.to(device, non_blocking=True)
-        if clean_images.shape[1] != 1:
+        expected_input_channels = int(vae.model.config.in_channels)
+        if clean_images.shape[1] != expected_input_channels:
             raise ValueError(
-                f"train6.py expects single-channel image patches, got shape {tuple(clean_images.shape)}."
+                f"VAE expects {expected_input_channels} input channels, got shape {tuple(clean_images.shape)}."
             )
-        if clean_images.shape[-2:] != (args.input_size, args.input_size):
+        vae_sample_size = vae.model.config.sample_size
+        if isinstance(vae_sample_size, (list, tuple)):
+            expected_image_size = tuple(int(value) for value in vae_sample_size)
+        else:
+            expected_image_size = (int(vae_sample_size), int(vae_sample_size))
+        if clean_images.shape[-2:] != expected_image_size:
             raise ValueError(
-                f"Expected {args.input_size}x{args.input_size} patches, "
+                f"VAE expects image patches with shape {expected_image_size}, "
                 f"got shape {tuple(clean_images.shape)}."
             )
-        if conditioning.shape[-2:] != (args.input_size, args.input_size):
-            raise ValueError(
-                f"Expected {args.input_size}x{args.input_size} dimension patches, "
-                f"got shape {tuple(conditioning.shape)}."
-            )
 
-        noise = torch.randn_like(clean_images)
-        timesteps = torch.rand(clean_images.shape[0], device=device)
-        flow_sample = flow_path.sample(t=timesteps, x_0=noise, x_1=clean_images)
-        noisy_images = flow_sample.x_t
+        with torch.inference_mode():
+            with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                clean_latents = encode_vae_latents(vae, clean_images)
+        conditioning = F.adaptive_avg_pool2d(
+            conditioning,
+            output_size=clean_latents.shape[-2:],
+        )
+
+        noise = torch.randn_like(clean_latents)
+        timesteps = torch.rand(clean_latents.shape[0], device=device)
+        flow_sample = flow_path.sample(t=timesteps, x_0=noise, x_1=clean_latents)
+        noisy_latents = flow_sample.x_t
         target_velocity = flow_sample.dx_t
 
         with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
             predicted_velocity = model(
-                noisy_images,
+                noisy_latents,
                 timesteps,
                 extra={"concat_conditioning": conditioning},
             )
@@ -270,7 +334,7 @@ def train_one_epoch(
             "epoch": epoch + 1,
             "step": step + 1,
             "total_steps": total_steps,
-            "batch_size": int(clean_images.shape[0]),
+            "batch_size": int(clean_latents.shape[0]),
             "loss": loss_value,
             "running_loss": running_loss / max(running_steps, 1),
             "lr": learning_rate,
@@ -290,6 +354,7 @@ def log_training_info(
         dataset,
         dataloader,
         model,
+        vae_latent_shape,
         total_params,
         trainable_params,
         frozen_params,
@@ -311,11 +376,14 @@ def log_training_info(
             "task": "dim_conditioned_flow_matching_seismic_generation",
             "train_data_dir": args.train_data_dir,
             "train_data_dim_dir": args.train_data_dim_dir,
+            "ckpt_vae": args.ckpt_vae,
             "dataset_size": len(dataset),
             "num_batches_per_epoch": len(dataloader),
             "model_arch": args.model_arch,
             "model_config": dict(model.model.config),
             "dim_channels": dataset.dataset1[0].shape[0],
+            "vae_latent_shape": list(vae_latent_shape),
+            "conditioning_resize": "adaptive_avg_pool2d_to_vae_latent_spatial_size",
             "total_params": total_params,
             "trainable_params": trainable_params,
             "frozen_params": frozen_params,
@@ -341,6 +409,7 @@ def main(args):
     device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()
     set_random_seed(seed)
+    vae = load_vae_model(args, device, logger)
 
     logger.log_event(
         "dataset_initializing",
@@ -349,19 +418,24 @@ def main(args):
     )
     dataset, train_loader = build_dataloader(args)
     dim_channels = dataset.dataset1[0].shape[0]
+    vae_latent_shape = infer_vae_latent_shape(vae, dataset, device)
+    latent_channels, latent_height, latent_width = vae_latent_shape
+    if latent_height != latent_width:
+        raise ValueError(f"Expected square VAE latents, got shape {vae_latent_shape}.")
     logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
         dim_channels=int(dim_channels),
         num_batches=len(train_loader),
+        vae_latent_shape=list(vae_latent_shape),
     )
 
     logger.log_event("model_initializing", model_arch=args.model_arch)
     model = build_dit_transformer_2d_wrapper(
         model_arch=args.model_arch,
-        in_channels=1 + dim_channels,
-        out_channels=1,
-        sample_size=args.input_size,
+        in_channels=latent_channels + dim_channels,
+        out_channels=latent_channels,
+        sample_size=latent_height,
         num_embeds_ada_norm=1,
         upcast_attention=args.upcast_attention,
         device=device,
@@ -379,6 +453,7 @@ def main(args):
         dataset=dataset,
         dataloader=train_loader,
         model=model_without_ddp,
+        vae_latent_shape=vae_latent_shape,
         total_params=total_params,
         trainable_params=trainable_params,
         frozen_params=frozen_params,
@@ -453,6 +528,7 @@ def main(args):
 
         epoch_loss = train_one_epoch(
             model=model,
+            vae=vae,
             dataloader=train_loader,
             optimizer=optimizer,
             scaler=scaler,
