@@ -13,12 +13,15 @@ class PatchDataset(Dataset):
     Designed for large datasets and multi-worker DataLoader.
     """
 
-    def __init__(self, data_path, transform=None, npy=True, verbose=False):
+    def __init__(self, data_path, transform=None, npy=True, verbose=False, step=1):
 
         self.transform = transform
         self.data_path = Path(data_path)
         self.verbose = verbose
         self.npy = bool(npy)
+        self.step = int(step)
+        if self.step <= 0:
+            raise ValueError("PatchDataset step must be positive.")
         file_pattern = "*.npy" if self.npy else "*.npz"
 
         # 文件缓存（每个 worker 独立）
@@ -64,13 +67,16 @@ class PatchDataset(Dataset):
             self.cumulative_sizes.append(end_idx)
 
         self.total_patches = self.cumulative_sizes[-1]
+        self.sampled_patches = (self.total_patches + self.step - 1) // self.step
 
         if self.verbose:
             print(f"Found {len(self.patch_files)} files")
             print(f"Total patches: {self.total_patches}")
+            print(f"Step: {self.step}")
+            print(f"Sampled patches: {self.sampled_patches}")
 
     def __len__(self):
-        return self.total_patches
+        return self.sampled_patches
 
     def _get_file_index(self, idx):
         """
@@ -88,8 +94,9 @@ class PatchDataset(Dataset):
 
     def __getitem__(self, idx):
 
-        if idx < 0 or idx >= self.total_patches:
+        if idx < 0 or idx >= self.sampled_patches:
             raise IndexError("Index out of range")
+        idx = idx * self.step
 
         # 找到对应文件
         file_idx = self._get_file_index(idx)
@@ -119,23 +126,33 @@ class PatchDataset(Dataset):
 
 
 class PairedPatchDataset(Dataset):
-    def __init__(self, data_path0, data_path1, transform=None, npy=True, verbose=False):
+    def __init__(
+            self,
+            data_path0,
+            data_path1,
+            transform=None,
+            npy=True,
+            verbose=False,
+            step=1,
+    ):
         self.dataset0 = PatchDataset(
             data_path0,
             transform=transform,
             npy=npy,
             verbose=verbose,
+            step=step,
         )
         self.dataset1 = PatchDataset(
             data_path1,
             transform=transform,
             npy=npy,
             verbose=verbose,
+            step=step,
         )
-        if len(self.dataset0) != len(self.dataset1):
+        if self.dataset0.total_patches != self.dataset1.total_patches:
             raise ValueError(
                 "PairedPatchDataset inputs must contain the same number of patches: "
-                f"got {len(self.dataset0)} and {len(self.dataset1)}."
+                f"got {self.dataset0.total_patches} and {self.dataset1.total_patches}."
             )
 
     def __len__(self):

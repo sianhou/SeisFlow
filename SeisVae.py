@@ -37,7 +37,7 @@ def build_parser():
             "  Valid:\n"
             "    python SeisVae.py valid --ckpt ./output_seis_vae/run/checkpoint_epoch_00500 "
             "--train_data_dir ./dataset256/valid --output_dir ./output_seis_vae/valid "
-            "--batch_size 16 --clip_recon -1 1 --plot_clim -1 1 --device cuda\n"
+            "--batch_size 16 --valid_step 1 --clip_recon -1 1 --plot_clim -1 1 --device cuda\n"
         ),
         formatter_class=RawDefaultsHelpFormatter,
     )
@@ -68,6 +68,12 @@ def build_parser():
         default=2.0,
         type=float,
         help="PSNR data range. Use <= 0 to compute each sample's max-minus-min range.",
+    )
+    parser.add_argument(
+        "--valid_step",
+        default=1,
+        type=int,
+        help="Validation data interval passed to PatchDataset. Use 1 for every patch, 10 for indices 0,10,20,...",
     )
     parser.add_argument(
         "--plot_clim",
@@ -367,7 +373,7 @@ def plot_latent_channels(latent, output_path):
 
 
 def build_valid_dataloader(args):
-    dataset = PatchDataset(args.train_data_dir)
+    dataset = PatchDataset(args.train_data_dir, step=args.valid_step)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -384,6 +390,8 @@ def run_valid(args):
         raise ValueError("--ckpt is required in valid mode.")
     if args.batch_size <= 0:
         raise ValueError("--batch_size must be positive.")
+    if args.valid_step <= 0:
+        raise ValueError("--valid_step must be positive.")
     if args.plot_clim is not None and args.plot_clim[0] >= args.plot_clim[1]:
         raise ValueError("--plot_clim VMIN must be smaller than VMAX.")
     if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
@@ -415,6 +423,8 @@ def run_valid(args):
     logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
+        total_patches=dataset.total_patches,
+        valid_step=args.valid_step,
         num_batches=len(dataloader),
     )
     logger.log_event("model_loading", checkpoint=args.ckpt)
@@ -430,7 +440,9 @@ def run_valid(args):
         checkpoint=args.ckpt,
         train_data_dir=args.train_data_dir,
         dataset_size=len(dataset),
+        total_patches=dataset.total_patches,
         batch_size=args.batch_size,
+        valid_step=args.valid_step,
         device=device,
         clip_recon=args.clip_recon,
         plot_clim=args.plot_clim,
@@ -517,6 +529,8 @@ def run_valid(args):
         f"output_dir: {output_dir}",
         f"device: {device}",
         f"batch_size: {args.batch_size}",
+        f"valid_step: {args.valid_step}",
+        f"total_patches: {dataset.total_patches}",
         f"dataset_size: {len(dataset)}",
         f"scanned_batches: {scanned_batches}",
         f"num_samples: {len(psnr_values)}",

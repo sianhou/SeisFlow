@@ -111,6 +111,21 @@ def test_patch_dataset_reads_npy_and_npz_correctly():
     )
 
 
+def test_patch_dataset_step_subsamples_global_indices():
+    patches = np.arange(10 * 2 * 2, dtype=np.float32).reshape(10, 2, 2)
+    expected = torch.from_numpy(patches[[0, 3, 6, 9]]).unsqueeze(1)
+
+    root = Path(tempfile.mkdtemp(prefix="patch_dataset_step_"))
+    try:
+        npy_dir, _ = _write_patch_files(root, patches)
+        dataset = PatchDataset(npy_dir, step=3)
+        assert len(dataset) == 4
+        observed = torch.stack([dataset[idx] for idx in range(len(dataset))])
+        assert torch.equal(observed, expected)
+    finally:
+        shutil.rmtree(root)
+
+
 if __name__ == "__main__":
     result = run_patch_dataset_io_check(num_workers=0)
     print("PatchDataset IO benchmark")
