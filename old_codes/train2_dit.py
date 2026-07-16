@@ -12,22 +12,21 @@ from torch.nn.parallel import DistributedDataParallel
 from torchmetrics import MeanMetric
 from torchvision import transforms
 
-from core.dataset import PatchDataset, SegyDataset
+from core.dataset import SegyDataset
 from core.logging.logger import SimpleLogger
 from core.masks.row_mask import generate_random_row_mask
 from core.metrics import compute_psnr
 from core.training import set_random_seed, count_model_parameters, AMPGradScaler
-from core.transforms import PerChannelMinMaxToMinusOneOne, SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
+from core.transforms import SliceLastDimension, ClipFirstChannel, ScaleFirstChannel
 from core.visualization import plot_seismic_grid
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from models.dit import DiT
-from models.unet import UNetModel
 from training import distributed_mode
 
 MODEL_CONFIGS = {
-    "simple_unet": {
+    "simple": {
         "in_channels": 3,
         "model_channels": 32,
         "out_channels": 1,
@@ -50,8 +49,8 @@ MODEL_CONFIGS = {
     "simple_dit": {
         "in_channels": 3,
         "out_channels": 1,
-        "input_size": 32,
-        "patch_size": 4,
+        "input_size": 256,
+        "patch_size": 8,
         "hidden_size": 384,
         "depth": 4,
         "num_heads": 8,
@@ -109,9 +108,9 @@ def create_parser():
     parser = argparse.ArgumentParser(description='Synthetic seismic dataset training')
     parser.add_argument("--accum_iter", default=1, type=int,
                         help="Accumulate gradient iterations (for increasing the effective batch size under memory constraints)")
-    parser.add_argument("--batch_size", default=128, type=int,
+    parser.add_argument("--batch_size", default=16, type=int,
                         help="Batch size per GPU (effective batch size is batch_size * accum_iter * gpus")
-    parser.add_argument("--dataset", default="./dataset_train",
+    parser.add_argument("--dataset", default="/disk03/hsa/SeisFlow/ma2+GathAP.sgy",
                         help="Segy data for training / testing")
     parser.add_argument("--decay_lr", action="store_true", help="Adds a linear decay to the lr during training.")
     parser.add_argument("--device", default="cuda", help="Device to use for training / testing")
@@ -153,9 +152,12 @@ def train(args):
     # dataset
     logger.info(f"Initializing Dataset: {args.dataset}")
     transform = transforms.Compose([
-        PerChannelMinMaxToMinusOneOne()
+        SliceLastDimension(0, 1501),
+        ClipFirstChannel(-2, 2),
+        ScaleFirstChannel(0.5),
+        transforms.Resize((256, 256)),
     ])
-    dataset_train = PatchDataset(args.dataset, transform=transform)
+    dataset_train = SegyDataset(args.dataset, transform=transform)
 
     logger.info("Intializing DataLoader")
     num_tasks = distributed_mode.get_world_size()
@@ -175,7 +177,7 @@ def train(args):
 
     # model
     logger.info("Initializing Model")
-    model = UNetModel(**MODEL_CONFIGS["simple_unet"])
+    model = DiT(**MODEL_CONFIGS["simple_dit"])
 
     model.to(device)
     model_without_ddp = model
@@ -334,7 +336,7 @@ def sample(args):
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
     ])
-    dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
+    dataset = SegyDataset("../ma2+GathAP.sgy", transform=transform)
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=4,
                                              shuffle=True,

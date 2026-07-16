@@ -107,7 +107,7 @@ transform = transforms.Compose([
     ScaleFirstChannel(0.5),
     transforms.Resize((256, 256)),
 ])
-dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
+dataset = SegyDataset("../ma2+GathAP.sgy", transform=transform)
 dataloader = torch.utils.data.DataLoader(dataset,
                                          batch_size=1,
                                          shuffle=True,

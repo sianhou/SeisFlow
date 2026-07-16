@@ -113,7 +113,7 @@ def train():
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
     ])
-    dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
+    dataset = SegyDataset("../ma2+GathAP.sgy", transform=transform)
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=batch_size,
                                              shuffle=True,
@@ -251,7 +251,7 @@ def eval(checkpoint):
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
     ])
-    dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
+    dataset = SegyDataset("../ma2+GathAP.sgy", transform=transform)
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=4,
                                              shuffle=True,

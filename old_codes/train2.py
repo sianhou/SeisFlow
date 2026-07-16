@@ -22,7 +22,7 @@ from core.visualization import plot_seismic_grid
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
-from models.dit import DiT
+from models.unet import UNetModel
 from training import distributed_mode
 
 MODEL_CONFIGS = {
@@ -45,18 +45,6 @@ MODEL_CONFIGS = {
         "resblock_updown": True,
         "use_new_attention_order": True,
         "with_fourier_features": False,
-    },
-    "simple_dit": {
-        "in_channels": 3,
-        "out_channels": 1,
-        "input_size": 256,
-        "patch_size": 8,
-        "hidden_size": 384,
-        "depth": 4,
-        "num_heads": 8,
-        "mlp_ratio": 4.0,
-        "num_classes": None,
-        "class_dropout_prob": 0.1,
     },
 }
 
@@ -177,7 +165,7 @@ def train(args):
 
     # model
     logger.info("Initializing Model")
-    model = DiT(**MODEL_CONFIGS["simple_dit"])
+    model = UNetModel(**MODEL_CONFIGS["simple"])
 
     model.to(device)
     model_without_ddp = model
@@ -336,7 +324,7 @@ def sample(args):
         ScaleFirstChannel(0.5),
         transforms.Resize((256, 256)),
     ])
-    dataset = SegyDataset("ma2+GathAP.sgy", transform=transform)
+    dataset = SegyDataset("../ma2+GathAP.sgy", transform=transform)
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=4,
                                              shuffle=True,
@@ -352,7 +340,7 @@ def sample(args):
     extra["concat_conditioning"] = torch.cat((missed, mask), dim=1)
 
     # model
-    model = DiT(**MODEL_CONFIGS["simple_dit"])
+    model = UNetModel(**MODEL_CONFIGS["simple"])
     model.load_state_dict(torch.load(args.model_path))
 
     cfg_scaled_model = CFGScaledModel(model=model)
