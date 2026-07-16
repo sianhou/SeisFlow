@@ -1,9 +1,15 @@
 import argparse
+import csv
 import gc
 import os
 import time
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -14,10 +20,35 @@ from models.wrapper import AutoencoderKLWrapper, build_autoencoder_kl_wrapper
 from training import distributed_mode
 
 
+class RawDefaultsHelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter,
+    argparse.RawDescriptionHelpFormatter,
+):
+    pass
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Train a Diffusers AutoencoderKL on single-channel seismic patch NPY files.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Train or validate a Diffusers AutoencoderKL on single-channel seismic patch NPY files.",
+        epilog=(
+            "Examples:\n"
+            "  Train:\n"
+            "    python SeisVae.py train --train_data_dir ./dataset256/train "
+            "--output_dir ./output_seis_vae --input_size 256 --latent_size 64 "
+            "--batch_size 16 --num_epochs 500 --device cuda\n\n"
+            "  Valid:\n"
+            "    python SeisVae.py valid --ckpt ./output_seis_vae/run/checkpoint_epoch_00500 "
+            "--train_data_dir ./dataset256/valid --output_dir ./output_seis_vae/valid "
+            "--batch_size 16 --device cuda\n"
+        ),
+        formatter_class=RawDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=["train", "valid"],
+        default="train",
+        help="Run mode. Omit for backward-compatible training.",
     )
     parser.add_argument(
         "--train_data_dir",
@@ -32,11 +63,23 @@ def build_parser():
     parser.add_argument(
         "--ckpt",
         default=None,
-        help="Optional checkpoint directory used to resume training in a new run directory.",
+        help="Checkpoint directory. In train mode it resumes training; in valid mode it is required.",
+    )
+    parser.add_argument(
+        "--valid_num_samples",
+        default=None,
+        type=int,
+        help="Optional maximum number of validation patches to process. Defaults to all patches.",
+    )
+    parser.add_argument(
+        "--psnr_data_range",
+        default=2.0,
+        type=float,
+        help="PSNR data range. Use <= 0 to compute each sample's max-minus-min range.",
     )
     parser.add_argument(
         "--batch_size",
-        default=16,
+        default=32,
         type=int,
         help="Mini-batch size per process.",
     )
@@ -48,7 +91,7 @@ def build_parser():
     )
     parser.add_argument(
         "--num_epochs",
-        default=100,
+        default=1000,
         type=int,
         help="Total number of training epochs.",
     )
@@ -77,7 +120,7 @@ def build_parser():
     )
     parser.add_argument(
         "--save_every_epochs",
-        default=10,
+        default=50,
         type=int,
         help="Save a checkpoint every N epochs.",
     )
@@ -186,7 +229,7 @@ def build_parser():
     return parser
 
 
-def build_dataloader(args):
+def build_train_dataloader(args):
     dataset = PatchDataset(args.train_data_dir)
 
     sampler = torch.utils.data.DistributedSampler(
@@ -232,6 +275,193 @@ def training_mode_name(args):
     if args.kl_weight > 0:
         return "weak_kl_vae"
     return "sampled_vae_no_kl"
+
+
+def compute_sample_psnr(target, reconstruction, data_range):
+    mse = float(np.mean((reconstruction - target) ** 2))
+    if data_range <= 0.0:
+        sample_range = max(float(np.max(target) - np.min(target)), 1e-12)
+    else:
+        sample_range = float(data_range)
+    return 20.0 * np.log10(sample_range) - 10.0 * np.log10(max(mse, 1e-12))
+
+
+def plot_reconstruction_triplet(input_image, output_image, diff_image, output_path, psnr):
+    seismic_vlim = max(
+        float(np.max(np.abs(input_image))),
+        float(np.max(np.abs(output_image))),
+        1e-6,
+    )
+    diff_vlim = max(float(np.max(np.abs(diff_image))), 1e-6)
+    panels = [
+        (input_image, "input", -seismic_vlim, seismic_vlim),
+        (output_image, "output", -seismic_vlim, seismic_vlim),
+        (diff_image, "diff", -diff_vlim, diff_vlim),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
+    for ax, (image, title, vmin, vmax) in zip(axes, panels):
+        im = ax.imshow(image.T, cmap="seismic", origin="upper", vmin=vmin, vmax=vmax)
+        ax.set_title(title)
+        ax.set_axis_off()
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+    fig.suptitle(f"VAE reconstruction | PSNR={psnr:.3f} dB", fontsize=12)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_latent_channels(latent, output_path):
+    if latent.ndim != 3:
+        raise ValueError(f"Expected latent with shape [C,H,W], got {latent.shape}.")
+    num_channels = min(int(latent.shape[0]), 4)
+    if num_channels < 4:
+        raise ValueError(
+            f"Expected at least 4 latent channels for four latent plots, got {latent.shape[0]}."
+        )
+
+    latent_to_plot = latent[:4]
+    latent_vlim = max(float(np.max(np.abs(latent_to_plot))), 1e-6)
+    fig, axes = plt.subplots(1, 4, figsize=(14, 3.5), constrained_layout=True)
+    for channel_idx, ax in enumerate(axes):
+        im = ax.imshow(
+            latent_to_plot[channel_idx].T,
+            cmap="seismic",
+            origin="upper",
+            vmin=-latent_vlim,
+            vmax=latent_vlim,
+        )
+        ax.set_title(f"latent {channel_idx}")
+        ax.set_axis_off()
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def build_valid_dataloader(args):
+    dataset = PatchDataset(args.train_data_dir)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        drop_last=False,
+    )
+    return dataset, dataloader
+
+
+def run_valid(args):
+    if args.ckpt is None:
+        raise ValueError("--ckpt is required in valid mode.")
+    if args.batch_size <= 0:
+        raise ValueError("--batch_size must be positive.")
+    if args.valid_num_samples is not None and args.valid_num_samples <= 0:
+        raise ValueError("--valid_num_samples must be positive when provided.")
+
+    output_dir = Path(args.output_dir)
+    device = torch.device(args.device)
+    set_random_seed(args.seed)
+
+    dataset, dataloader = build_valid_dataloader(args)
+    model = AutoencoderKLWrapper.from_pretrained(args.ckpt, device=device)
+    model.eval()
+
+    rows = []
+    sample_index = 0
+    max_samples = args.valid_num_samples
+    metrics_path = output_dir / "metrics.csv"
+
+    with torch.inference_mode():
+        for batch in dataloader:
+            if max_samples is not None and sample_index >= max_samples:
+                break
+
+            batch = batch.to(device, non_blocking=True)
+            if max_samples is not None:
+                remaining = max_samples - sample_index
+                batch = batch[:remaining]
+
+            expected_channels = int(model.model.config.in_channels)
+            sample_size = model.model.config.sample_size
+            if isinstance(sample_size, (list, tuple)):
+                expected_size = int(sample_size[0])
+            else:
+                expected_size = int(sample_size)
+            if batch.shape[1] != expected_channels:
+                raise ValueError(
+                    f"Checkpoint expects {expected_channels} input channels, got {batch.shape[1]}."
+                )
+            if batch.shape[-2:] != (expected_size, expected_size):
+                raise ValueError(
+                    f"Checkpoint expects {expected_size}x{expected_size} patches, got {tuple(batch.shape[-2:])}."
+                )
+
+            with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                outputs = model(batch, sample_posterior=False)
+
+            recon_batch = outputs["recon"].detach().float().cpu().numpy()
+            input_batch = batch.detach().float().cpu().numpy()
+            latent_batch = outputs["mean"].detach().float().cpu().numpy()
+
+            for batch_offset in range(input_batch.shape[0]):
+                input_image = input_batch[batch_offset, 0]
+                output_image = recon_batch[batch_offset, 0]
+                diff_image = output_image - input_image
+                psnr = float(
+                    compute_sample_psnr(
+                        input_image,
+                        output_image,
+                        data_range=args.psnr_data_range,
+                    )
+                )
+                stem = f"sample_{sample_index:06d}"
+                recon_path = output_dir / f"{stem}_reconstruction.png"
+                latent_path = output_dir / f"{stem}_latent.png"
+                plot_reconstruction_triplet(
+                    input_image=input_image,
+                    output_image=output_image,
+                    diff_image=diff_image,
+                    output_path=recon_path,
+                    psnr=psnr,
+                )
+                plot_latent_channels(latent_batch[batch_offset], latent_path)
+                rows.append(
+                    {
+                        "sample": sample_index,
+                        "psnr": psnr,
+                        "reconstruction_png": recon_path.name,
+                        "latent_png": latent_path.name,
+                    }
+                )
+                sample_index += 1
+
+    with metrics_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["sample", "psnr", "reconstruction_png", "latent_png"],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    mean_psnr = float(np.mean([row["psnr"] for row in rows])) if rows else float("nan")
+    summary_path = output_dir / "summary.txt"
+    summary_path.write_text(
+        "\n".join(
+            [
+                f"checkpoint: {args.ckpt}",
+                f"train_data_dir: {args.train_data_dir}",
+                f"num_samples: {len(rows)}",
+                f"mean_psnr: {mean_psnr:.6f}",
+                f"metrics: {metrics_path.name}",
+            ]
+        )
+        + "\n"
+    )
+    print(
+        f"[valid] Saved {len(rows)} samples to {output_dir}. "
+        f"mean_psnr={mean_psnr:.3f} dB",
+        flush=True,
+    )
 
 
 def train_one_epoch(
@@ -377,7 +607,7 @@ def log_training_info(
     )
 
 
-def main(args):
+def run_train(args):
     distributed_mode.init_distributed_mode(args)
 
     logger = DistributedSimpleLogger2(
@@ -404,7 +634,7 @@ def main(args):
     set_random_seed(seed)
 
     logger.log_event("dataset_initializing", train_data_dir=args.train_data_dir)
-    dataset, train_sampler, train_loader = build_dataloader(args)
+    dataset, train_sampler, train_loader = build_train_dataloader(args)
     logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
@@ -562,4 +792,7 @@ if __name__ == "__main__":
     parsed_args = parser.parse_args()
     if parsed_args.output_dir:
         Path(parsed_args.output_dir).mkdir(parents=True, exist_ok=True)
-    main(parsed_args)
+    if parsed_args.mode == "valid":
+        run_valid(parsed_args)
+    else:
+        run_train(parsed_args)
