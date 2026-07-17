@@ -49,7 +49,7 @@ def build_parser():
             "--ckpt_vae ./output_seis_vae/run/checkpoint_epoch_00100 "
             "--train_data_dim_dir ./dataset256/valid_dim "
             "--output_dir ./output_seis_vae_dim_recon/valid "
-            "--output_npy reconstructed_patches.npy --batch_size 32 --device cuda\n"
+            "--batch_size 32 --device cuda\n"
         ),
         formatter_class=RawDefaultsHelpFormatter,
     )
@@ -98,15 +98,18 @@ def build_parser():
         help="VAE checkpoint directory saved by SeisVae.py/train_seismic_vae.py.",
     )
     parser.add_argument(
-        "--output_npy",
-        default=None,
-        help="Validation output NPY path. Defaults to <output_dir>/reconstructed_patches.npy.",
-    )
-    parser.add_argument(
         "--solver_step_size",
         default=0.05,
         type=float,
         help="Euler solver step size used in valid mode.",
+    )
+    parser.add_argument(
+        "--clip_recon",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="Clip reconstructed valid output data to [MIN, MAX]. Disabled by default.",
     )
     parser.add_argument(
         "--batch_size",
@@ -240,19 +243,6 @@ def build_dataloader(args):
     return dataset, dataloader
 
 
-def build_valid_dataloader(args):
-    dataset = PatchDataset(args.train_data_dim_dir)
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        drop_last=False,
-    )
-    return dataset, dataloader
-
-
 def validate_train_args(args):
     validate_common_args(args, mode="train")
     if args.grad_accum_steps <= 0:
@@ -271,8 +261,12 @@ def validate_valid_args(args):
         raise ValueError("--ckpt is required in valid mode.")
     if not Path(args.ckpt).is_dir():
         raise FileNotFoundError(f"--ckpt must be a SeisVaeDimRecon.py checkpoint directory, got {args.ckpt}.")
+    if not Path(args.train_data_dim_dir).is_dir():
+        raise FileNotFoundError(f"--train_data_dim_dir must be a directory, got {args.train_data_dim_dir}.")
     if args.solver_step_size <= 0:
         raise ValueError("--solver_step_size must be positive.")
+    if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
+        raise ValueError("--clip_recon MIN must be smaller than MAX.")
 
 
 def validate_common_args(args, mode):
@@ -383,6 +377,128 @@ def validate_dim_latent_model_channels(model, latent_channels, dim_channels):
             "Checkpoint output channel count does not match VAE latent channels: "
             f"model out_channels={model_out_channels}, latent_channels={latent_channels}."
         )
+
+
+def split_patch_files_for_rank(dataset):
+    rank = distributed_mode.get_rank()
+    world_size = distributed_mode.get_world_size()
+    return dataset.patch_files[rank::world_size]
+
+
+def make_conditioning_batch(array, start, end, device):
+    batch = np.array(array[start:end], copy=True)
+    if batch.ndim == 3:
+        batch = batch[:, np.newaxis, :, :]
+    tensor = torch.from_numpy(batch).float()
+    return tensor.to(device, non_blocking=True)
+
+
+def get_reconstruction_output_file(input_file, input_root, output_root):
+    relative_path = Path(input_file).relative_to(input_root)
+    return Path(output_root) / relative_path
+
+
+def restore_reconstruction_file_shape(reconstructed, input_array):
+    if reconstructed.shape[1] == 1 and input_array.ndim == 3:
+        return reconstructed.squeeze(1).numpy()
+    return reconstructed.numpy()
+
+
+def reconstruct_dim_file(
+        input_file,
+        input_root,
+        output_root,
+        vae,
+        solver,
+        time_grid,
+        device,
+        args,
+        logger,
+        latent_channels,
+        latent_height,
+        latent_width,
+        file_index,
+):
+    dim_array = np.load(input_file, mmap_mode="r")
+    num_patches = int(dim_array.shape[0])
+    output_file = get_reconstruction_output_file(input_file, input_root, output_root)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    reconstructed_batches = []
+    file_min = None
+    file_max = None
+    rank = distributed_mode.get_rank()
+
+    for batch_start in range(0, num_patches, args.batch_size):
+        batch_end = min(batch_start + args.batch_size, num_patches)
+        conditioning = make_conditioning_batch(dim_array, batch_start, batch_end, device)
+        conditioning = resize_conditioning_to_latent(
+            conditioning,
+            (latent_height, latent_width),
+        )
+        latent_noise = torch.randn(
+            (
+                conditioning.shape[0],
+                latent_channels,
+                latent_height,
+                latent_width,
+            ),
+            device=device,
+            dtype=conditioning.dtype,
+        )
+        sampled_latents = solver.sample(
+            time_grid=time_grid,
+            x_init=latent_noise,
+            return_intermediates=False,
+            step_size=args.solver_step_size,
+            cfg_scale=0.0,
+            label=None,
+            concat_conditioning={"concat_conditioning": conditioning},
+        )
+        with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
+            reconstructed = vae.model.decode(sampled_latents).sample
+        reconstructed = reconstructed.detach().float().cpu()
+        if args.clip_recon is not None:
+            reconstructed = reconstructed.clamp(
+                min=float(args.clip_recon[0]),
+                max=float(args.clip_recon[1]),
+            )
+        reconstructed_batches.append(reconstructed)
+        batch_min = float(reconstructed.min())
+        batch_max = float(reconstructed.max())
+        file_min = batch_min if file_min is None else min(file_min, batch_min)
+        file_max = batch_max if file_max is None else max(file_max, batch_max)
+
+        logger.log_valid(
+            rank=rank,
+            file_index=file_index,
+            file_name=Path(input_file).name,
+            batch_start=batch_start,
+            batch_end=batch_end,
+            batch_size=batch_end - batch_start,
+        )
+
+    reconstructed_patches = torch.cat(reconstructed_batches, dim=0)
+    reconstructed_array = restore_reconstruction_file_shape(reconstructed_patches, dim_array)
+    np.save(output_file, reconstructed_array)
+
+    return {
+        "rank": rank,
+        "input_file": str(input_file),
+        "output_file": str(output_file),
+        "num_patches": num_patches,
+        "output_shape": list(reconstructed_array.shape),
+        "output_min": file_min,
+        "output_max": file_max,
+    }
+
+
+def gather_validation_summaries(local_summary):
+    if not distributed_mode.is_dist_avail_and_initialized():
+        return [local_summary]
+    summaries = [None for _ in range(distributed_mode.get_world_size())]
+    torch.distributed.all_gather_object(summaries, local_summary)
+    return summaries
 
 
 class DimLatentVelocityModel(ModelWrapper):
@@ -726,17 +842,20 @@ def run_train(args):
 
 def run_valid(args):
     validate_valid_args(args)
+    distributed_mode.init_distributed_mode(args)
 
     logger = build_dist_logger(
         args,
         log_id=args.log_id or ".",
-        distributed=False,
-        rank=0,
-        world_size=1,
-        local_rank=0,
+        distributed=getattr(args, "distributed", False),
+        rank=distributed_mode.get_rank(),
+        world_size=distributed_mode.get_world_size(),
+        local_rank=getattr(args, "gpu", 0),
         console=args.log_console,
         logs=[
-            "batch",
+            "rank",
+            "file_index",
+            "file_name",
             "batch_start",
             "batch_end",
             "batch_size",
@@ -744,8 +863,9 @@ def run_valid(args):
     )
     output_dir = logger.run_dir
     device = torch.device(args.device)
-    set_random_seed(args.seed)
-    np.random.seed(args.seed)
+    seed = args.seed + distributed_mode.get_rank()
+    set_random_seed(seed)
+    np.random.seed(seed)
 
     vae, vae_latent_shape = prepare_vae_and_latent_shape(args, device, logger)
     latent_channels, latent_height, latent_width = vae_latent_shape
@@ -764,108 +884,123 @@ def run_valid(args):
     )
 
     logger.log_event("valid_dataset_initializing", train_data_dim_dir=args.train_data_dim_dir)
-    dataset, dataloader = build_valid_dataloader(args)
+    dataset = PatchDataset(args.train_data_dim_dir)
     dim_channels = dataset[0].shape[0]
     validate_dim_latent_model_channels(model, latent_channels, dim_channels)
+    rank_files = split_patch_files_for_rank(dataset)
     logger.log_event(
         "valid_dataset_initialized",
         dataset_size=len(dataset),
         dim_channels=int(dim_channels),
-        num_batches=len(dataloader),
+        total_files=len(dataset.patch_files),
+        rank_files=len(rank_files),
+        rank=distributed_mode.get_rank(),
+        world_size=distributed_mode.get_world_size(),
         vae_latent_shape=list(vae_latent_shape),
     )
 
     solver = ODESolver(velocity_model=DimLatentVelocityModel(model).to(device))
     time_grid = torch.tensor([0.0, 1.0], device=device)
-    reconstructed_batches = []
-    patch_index = 0
+    file_summaries = []
 
     logger.log_event(
         "validation_started",
         checkpoint=args.ckpt,
         ckpt_vae=args.ckpt_vae,
         train_data_dim_dir=args.train_data_dim_dir,
+        output_dir=str(output_dir),
         solver_step_size=args.solver_step_size,
+        clip_recon="" if args.clip_recon is None else list(args.clip_recon),
         batch_size=args.batch_size,
+        rank=distributed_mode.get_rank(),
+        world_size=distributed_mode.get_world_size(),
     )
 
     with torch.inference_mode():
-        for batch_index, conditioning in enumerate(dataloader):
-            batch_start = patch_index
-            conditioning = conditioning.to(device, non_blocking=True)
-            conditioning = resize_conditioning_to_latent(
-                conditioning,
-                (latent_height, latent_width),
-            )
-            latent_noise = torch.randn(
-                (
-                    conditioning.shape[0],
-                    latent_channels,
-                    latent_height,
-                    latent_width,
-                ),
-                device=device,
-                dtype=conditioning.dtype,
-            )
-            sampled_latents = solver.sample(
+        for file_index, input_file in enumerate(rank_files):
+            file_summary = reconstruct_dim_file(
+                input_file=input_file,
+                input_root=dataset.data_path,
+                output_root=output_dir,
+                vae=vae,
+                solver=solver,
                 time_grid=time_grid,
-                x_init=latent_noise,
-                return_intermediates=False,
-                step_size=args.solver_step_size,
-                cfg_scale=0.0,
-                label=None,
-                concat_conditioning={"concat_conditioning": conditioning},
+                device=device,
+                args=args,
+                logger=logger,
+                latent_channels=latent_channels,
+                latent_height=latent_height,
+                latent_width=latent_width,
+                file_index=file_index,
             )
-            with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
-                reconstructed = vae.model.decode(sampled_latents).sample
-            reconstructed_batches.append(reconstructed.detach().float().cpu())
-            patch_index += int(reconstructed.shape[0])
-            logger.log_valid(
-                batch=batch_index + 1,
-                batch_start=batch_start,
-                batch_end=patch_index,
-                batch_size=int(reconstructed.shape[0]),
-            )
+            file_summaries.append(file_summary)
 
-    reconstructed_patches = torch.cat(reconstructed_batches, dim=0)
-    if reconstructed_patches.shape[1] == 1:
-        reconstructed_array = reconstructed_patches.squeeze(1).numpy()
-    else:
-        reconstructed_array = reconstructed_patches.numpy()
-
-    if args.output_npy is None:
-        output_npy = output_dir / "reconstructed_patches.npy"
-    else:
-        output_npy = Path(args.output_npy)
-    if args.output_npy is not None and not output_npy.is_absolute():
-        output_npy = output_dir / output_npy
-    output_npy.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output_npy, reconstructed_array)
+    local_summary = {
+        "rank": distributed_mode.get_rank(),
+        "num_files": len(file_summaries),
+        "num_patches": int(sum(item["num_patches"] for item in file_summaries)),
+        "files": file_summaries,
+    }
+    gathered_summaries = gather_validation_summaries(local_summary)
+    flat_file_summaries = [
+        file_summary
+        for rank_summary in gathered_summaries
+        for file_summary in rank_summary["files"]
+    ]
+    total_patches = int(sum(item["num_patches"] for item in flat_file_summaries))
+    output_min = min(
+        (item["output_min"] for item in flat_file_summaries if item["output_min"] is not None),
+        default=None,
+    )
+    output_max = max(
+        (item["output_max"] for item in flat_file_summaries if item["output_max"] is not None),
+        default=None,
+    )
 
     summary_path = output_dir / "summary.txt"
-    summary_lines = [
-        f"checkpoint: {args.ckpt}",
-        f"checkpoint_epoch: {checkpoint_epoch}",
-        f"ckpt_vae: {args.ckpt_vae}",
-        f"train_data_dim_dir: {args.train_data_dim_dir}",
-        f"output_npy: {output_npy}",
-        f"num_patches: {int(reconstructed_array.shape[0])}",
-        f"output_shape: {list(reconstructed_array.shape)}",
-        f"output_min: {float(np.min(reconstructed_array)):.6g}",
-        f"output_max: {float(np.max(reconstructed_array)):.6g}",
-        f"vae_latent_shape: {list(vae_latent_shape)}",
-        f"solver_step_size: {args.solver_step_size}",
-    ]
-    summary_path.write_text("\n".join(summary_lines) + "\n")
+    if distributed_mode.get_rank() == 0:
+        summary_lines = [
+            f"checkpoint: {args.ckpt}",
+            f"checkpoint_epoch: {checkpoint_epoch}",
+            f"ckpt_vae: {args.ckpt_vae}",
+            f"train_data_dim_dir: {args.train_data_dim_dir}",
+            f"output_dir: {output_dir}",
+            f"num_input_files: {len(dataset.patch_files)}",
+            f"num_output_files: {len(flat_file_summaries)}",
+            f"num_patches: {total_patches}",
+            f"output_min: {'' if output_min is None else f'{output_min:.6g}'}",
+            f"output_max: {'' if output_max is None else f'{output_max:.6g}'}",
+            f"vae_latent_shape: {list(vae_latent_shape)}",
+            f"solver_step_size: {args.solver_step_size}",
+            f"clip_recon: {'' if args.clip_recon is None else list(args.clip_recon)}",
+            "",
+            "files:",
+        ]
+        for item in sorted(flat_file_summaries, key=lambda value: value["output_file"]):
+            summary_lines.append(
+                f"{item['output_file']} | patches={item['num_patches']} | "
+                f"shape={item['output_shape']} | source={item['input_file']}"
+            )
+        summary_path.write_text("\n".join(summary_lines) + "\n")
+
     logger.log_event(
         "validation_finished",
-        output_npy=str(output_npy),
-        output_shape=list(reconstructed_array.shape),
-        output_min=float(np.min(reconstructed_array)),
-        output_max=float(np.max(reconstructed_array)),
+        output_dir=str(output_dir),
+        num_output_files=len(flat_file_summaries),
+        num_patches=total_patches,
+        output_min="" if output_min is None else output_min,
+        output_max="" if output_max is None else output_max,
         summary=str(summary_path),
+        rank=distributed_mode.get_rank(),
     )
     logger.close()
+
+    if getattr(args, "distributed", False):
+        if getattr(args, "dist_backend", None) == "nccl":
+            distributed_mode.barrier([args.gpu])
+        else:
+            distributed_mode.barrier()
+        distributed_mode.destroy()
 
 
 if __name__ == "__main__":

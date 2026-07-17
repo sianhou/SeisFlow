@@ -48,6 +48,11 @@ def destroy():
     dist.destroy_process_group()
 
 
+def _use_cuda_backend(args):
+    device = str(getattr(args, "device", "cuda"))
+    return device.startswith("cuda") and torch.cuda.is_available()
+
+
 def init_distributed_mode(args):
     if args.dist_on_itp:
         args.rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
@@ -77,11 +82,15 @@ def init_distributed_mode(args):
 
     args.distributed = True
 
-    torch.cuda.set_device(args.gpu)
-    args.dist_backend = "nccl"
+    use_cuda = _use_cuda_backend(args)
+    if use_cuda:
+        torch.cuda.set_device(args.gpu)
+        args.dist_backend = "nccl"
+    else:
+        args.dist_backend = "gloo"
     print(
-        "| distributed init (rank {}): {}, gpu {}".format(
-            args.rank, args.dist_url, args.gpu
+        "| distributed init (rank {}): {}, backend {}, local_rank {}".format(
+            args.rank, args.dist_url, args.dist_backend, args.gpu
         ),
         flush=True,
     )
@@ -92,4 +101,7 @@ def init_distributed_mode(args):
         rank=args.rank,
         timeout=timedelta(hours=1),
     )
-    barrier([args.gpu])
+    if use_cuda:
+        barrier([args.gpu])
+    else:
+        barrier()
