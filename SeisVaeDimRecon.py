@@ -3,13 +3,16 @@ import gc
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from core.dataset import PairedPatchDataset
+from core.dataset import PairedPatchDataset, PatchDataset
 from core.logging.logger import build_dist_logger
 from core.training import AMPGradScaler, count_model_parameters, set_random_seed
 from flow_matching.path import CondOTProbPath
+from flow_matching.solver import ODESolver
+from flow_matching.utils import ModelWrapper
 from models.wrapper import (
     AutoencoderKLWrapper,
     DIT_TRANSFORMER_2D_CONFIGS,
@@ -32,15 +35,30 @@ def build_parser():
             "Train a dimension-conditioned flow-matching model in VAE latent space."
         ),
         epilog=(
-            "Example:\n"
+            "Examples:\n"
+            "  Train:\n"
             "  python SeisVaeDimRecon.py "
             "--ckpt_vae ./output_seis_vae/run/checkpoint_epoch_00100 "
             "--train_data_dir ./dataset256/train "
             "--train_data_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_seis_vae_dim_recon "
-            "--model_arch DiT_T_4 --batch_size 32 --num_epochs 1000 --device cuda\n"
+            "--model_arch DiT_T_4 --batch_size 32 --num_epochs 1000 --device cuda\n\n"
+            "  Valid:\n"
+            "  python SeisVaeDimRecon.py valid "
+            "--ckpt ./output_seis_vae_dim_recon/run/checkpoint_epoch_00100 "
+            "--ckpt_vae ./output_seis_vae/run/checkpoint_epoch_00100 "
+            "--train_data_dim_dir ./dataset256/valid_dim "
+            "--output_dir ./output_seis_vae_dim_recon/valid "
+            "--output_npy reconstructed_patches.npy --batch_size 32 --device cuda\n"
         ),
         formatter_class=RawDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=["train", "valid"],
+        default="train",
+        help="Run mode. Omit for training.",
     )
     parser.add_argument(
         "--train_data_dir",
@@ -76,8 +94,19 @@ def build_parser():
     )
     parser.add_argument(
         "--ckpt_vae",
-        required=True,
+        default=None,
         help="VAE checkpoint directory saved by SeisVae.py/train_seismic_vae.py.",
+    )
+    parser.add_argument(
+        "--output_npy",
+        default=None,
+        help="Validation output NPY path. Defaults to <output_dir>/reconstructed_patches.npy.",
+    )
+    parser.add_argument(
+        "--solver_step_size",
+        default=0.05,
+        type=float,
+        help="Euler solver step size used in valid mode.",
     )
     parser.add_argument(
         "--batch_size",
@@ -211,6 +240,50 @@ def build_dataloader(args):
     return dataset, dataloader
 
 
+def build_valid_dataloader(args):
+    dataset = PatchDataset(args.train_data_dim_dir)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        drop_last=False,
+    )
+    return dataset, dataloader
+
+
+def validate_train_args(args):
+    validate_common_args(args, mode="train")
+    if args.grad_accum_steps <= 0:
+        raise ValueError("--grad_accum_steps must be positive.")
+    if args.num_epochs <= 0:
+        raise ValueError("--num_epochs must be positive.")
+    if args.learning_rate <= 0:
+        raise ValueError("--learning_rate must be positive.")
+    if args.save_every_epochs <= 0:
+        raise ValueError("--save_every_epochs must be positive.")
+
+
+def validate_valid_args(args):
+    validate_common_args(args, mode="valid")
+    if args.ckpt is None:
+        raise ValueError("--ckpt is required in valid mode.")
+    if not Path(args.ckpt).is_dir():
+        raise FileNotFoundError(f"--ckpt must be a SeisVaeDimRecon.py checkpoint directory, got {args.ckpt}.")
+    if args.solver_step_size <= 0:
+        raise ValueError("--solver_step_size must be positive.")
+
+
+def validate_common_args(args, mode):
+    if args.ckpt_vae is None:
+        raise ValueError(f"--ckpt_vae is required in {mode} mode.")
+    if not Path(args.ckpt_vae).is_dir():
+        raise FileNotFoundError(f"--ckpt_vae must be a VAE checkpoint directory, got {args.ckpt_vae}.")
+    if args.batch_size <= 0:
+        raise ValueError("--batch_size must be positive.")
+
+
 def load_vae_model(args, device, logger):
     checkpoint_dir = Path(args.ckpt_vae)
     if not checkpoint_dir.is_dir():
@@ -231,6 +304,28 @@ def load_vae_model(args, device, logger):
     return vae
 
 
+def get_vae_sample_size(vae):
+    sample_size = vae.model.config.sample_size
+    if isinstance(sample_size, (list, tuple)):
+        return tuple(int(value) for value in sample_size)
+    size = int(sample_size)
+    return size, size
+
+
+def validate_vae_input_images(vae, images):
+    expected_input_channels = int(vae.model.config.in_channels)
+    if images.shape[1] != expected_input_channels:
+        raise ValueError(
+            f"VAE expects {expected_input_channels} input channels, got shape {tuple(images.shape)}."
+        )
+    expected_image_size = get_vae_sample_size(vae)
+    if images.shape[-2:] != expected_image_size:
+        raise ValueError(
+            f"VAE expects image patches with shape {expected_image_size}, "
+            f"got shape {tuple(images.shape)}."
+        )
+
+
 def encode_vae_latents(vae, images):
     posterior = vae.model.encode(images).latent_dist
     return posterior.mode()
@@ -241,6 +336,78 @@ def infer_vae_latent_shape(vae, dataset, device):
     with torch.inference_mode():
         latents = encode_vae_latents(vae, sample)
     return tuple(int(value) for value in latents.shape[1:])
+
+
+def infer_vae_latent_shape_from_config(vae, device):
+    height, width = get_vae_sample_size(vae)
+    channels = int(vae.model.config.in_channels)
+    sample = torch.zeros((1, channels, height, width), device=device)
+    with torch.inference_mode():
+        latents = encode_vae_latents(vae, sample)
+    return tuple(int(value) for value in latents.shape[1:])
+
+
+def validate_square_latent_shape(vae_latent_shape):
+    _, latent_height, latent_width = vae_latent_shape
+    if latent_height != latent_width:
+        raise ValueError(f"Expected square VAE latents, got shape {vae_latent_shape}.")
+
+
+def prepare_vae_and_latent_shape(args, device, logger, dataset=None):
+    vae = load_vae_model(args, device, logger)
+    if dataset is None:
+        vae_latent_shape = infer_vae_latent_shape_from_config(vae, device)
+    else:
+        vae_latent_shape = infer_vae_latent_shape(vae, dataset, device)
+    validate_square_latent_shape(vae_latent_shape)
+    return vae, vae_latent_shape
+
+
+def resize_conditioning_to_latent(conditioning, latent_spatial_size):
+    return F.adaptive_avg_pool2d(conditioning, output_size=latent_spatial_size)
+
+
+def validate_dim_latent_model_channels(model, latent_channels, dim_channels):
+    expected_model_in_channels = latent_channels + dim_channels
+    model_in_channels = int(model.model.config.in_channels)
+    model_out_channels = int(model.model.config.out_channels)
+    if model_in_channels != expected_model_in_channels:
+        raise ValueError(
+            "Checkpoint input channel count does not match VAE latent + dim data: "
+            f"model in_channels={model_in_channels}, "
+            f"latent_channels={latent_channels}, dim_channels={dim_channels}, "
+            f"expected={expected_model_in_channels}."
+        )
+    if model_out_channels != latent_channels:
+        raise ValueError(
+            "Checkpoint output channel count does not match VAE latent channels: "
+            f"model out_channels={model_out_channels}, latent_channels={latent_channels}."
+        )
+
+
+class DimLatentVelocityModel(ModelWrapper):
+    def __init__(self, model):
+        super().__init__(model)
+
+    def forward(
+            self,
+            x,
+            t,
+            cfg_scale,
+            label,
+            concat_conditioning,
+    ):
+        del cfg_scale, label
+
+        if t.ndim == 0:
+            t = torch.full((x.shape[0],), float(t), device=x.device, dtype=x.dtype)
+        else:
+            t = t.to(device=x.device, dtype=x.dtype).expand(x.shape[0])
+
+        with torch.inference_mode():
+            with torch.amp.autocast(device_type=x.device.type, enabled=x.device.type == "cuda"):
+                result = self.model(x, t, extra=concat_conditioning)
+        return result.to(dtype=torch.float32)
 
 
 def train_one_epoch(
@@ -273,29 +440,12 @@ def train_one_epoch(
         clean_images, conditioning = batch
         clean_images = clean_images.to(device, non_blocking=True)
         conditioning = conditioning.to(device, non_blocking=True)
-        expected_input_channels = int(vae.model.config.in_channels)
-        if clean_images.shape[1] != expected_input_channels:
-            raise ValueError(
-                f"VAE expects {expected_input_channels} input channels, got shape {tuple(clean_images.shape)}."
-            )
-        vae_sample_size = vae.model.config.sample_size
-        if isinstance(vae_sample_size, (list, tuple)):
-            expected_image_size = tuple(int(value) for value in vae_sample_size)
-        else:
-            expected_image_size = (int(vae_sample_size), int(vae_sample_size))
-        if clean_images.shape[-2:] != expected_image_size:
-            raise ValueError(
-                f"VAE expects image patches with shape {expected_image_size}, "
-                f"got shape {tuple(clean_images.shape)}."
-            )
+        validate_vae_input_images(vae, clean_images)
 
         with torch.inference_mode():
             with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
                 clean_latents = encode_vae_latents(vae, clean_images)
-        conditioning = F.adaptive_avg_pool2d(
-            conditioning,
-            output_size=clean_latents.shape[-2:],
-        )
+        conditioning = resize_conditioning_to_latent(conditioning, clean_latents.shape[-2:])
 
         noise = torch.randn_like(clean_latents)
         timesteps = torch.rand(clean_latents.shape[0], device=device)
@@ -401,7 +551,8 @@ def log_training_info(
     )
 
 
-def main(args):
+def run_train(args):
+    validate_train_args(args)
     distributed_mode.init_distributed_mode(args)
 
     logger = build_dist_logger(args, log_node_info=True)
@@ -409,7 +560,6 @@ def main(args):
     device = torch.device(args.device)
     seed = args.seed + distributed_mode.get_rank()
     set_random_seed(seed)
-    vae = load_vae_model(args, device, logger)
 
     logger.log_event(
         "dataset_initializing",
@@ -418,10 +568,8 @@ def main(args):
     )
     dataset, train_loader = build_dataloader(args)
     dim_channels = dataset.dataset1[0].shape[0]
-    vae_latent_shape = infer_vae_latent_shape(vae, dataset, device)
+    vae, vae_latent_shape = prepare_vae_and_latent_shape(args, device, logger, dataset=dataset)
     latent_channels, latent_height, latent_width = vae_latent_shape
-    if latent_height != latent_width:
-        raise ValueError(f"Expected square VAE latents, got shape {vae_latent_shape}.")
     logger.log_event(
         "dataset_initialized",
         dataset_size=len(dataset),
@@ -576,9 +724,156 @@ def main(args):
         distributed_mode.destroy()
 
 
+def run_valid(args):
+    validate_valid_args(args)
+
+    logger = build_dist_logger(
+        args,
+        log_id=args.log_id or ".",
+        distributed=False,
+        rank=0,
+        world_size=1,
+        local_rank=0,
+        console=args.log_console,
+        logs=[
+            "batch",
+            "batch_start",
+            "batch_end",
+            "batch_size",
+        ],
+    )
+    output_dir = logger.run_dir
+    device = torch.device(args.device)
+    set_random_seed(args.seed)
+    np.random.seed(args.seed)
+
+    vae, vae_latent_shape = prepare_vae_and_latent_shape(args, device, logger)
+    latent_channels, latent_height, latent_width = vae_latent_shape
+
+    logger.log_event("checkpoint_loading", path=args.ckpt)
+    model, checkpoint_epoch, training_state = DiTTransformer2DWrapper.from_training(
+        save_directory=args.ckpt,
+        device=device,
+    )
+    del training_state
+    model.eval()
+    logger.log_event(
+        "checkpoint_loaded",
+        path=args.ckpt,
+        checkpoint_epoch=checkpoint_epoch,
+    )
+
+    logger.log_event("valid_dataset_initializing", train_data_dim_dir=args.train_data_dim_dir)
+    dataset, dataloader = build_valid_dataloader(args)
+    dim_channels = dataset[0].shape[0]
+    validate_dim_latent_model_channels(model, latent_channels, dim_channels)
+    logger.log_event(
+        "valid_dataset_initialized",
+        dataset_size=len(dataset),
+        dim_channels=int(dim_channels),
+        num_batches=len(dataloader),
+        vae_latent_shape=list(vae_latent_shape),
+    )
+
+    solver = ODESolver(velocity_model=DimLatentVelocityModel(model).to(device))
+    time_grid = torch.tensor([0.0, 1.0], device=device)
+    reconstructed_batches = []
+    patch_index = 0
+
+    logger.log_event(
+        "validation_started",
+        checkpoint=args.ckpt,
+        ckpt_vae=args.ckpt_vae,
+        train_data_dim_dir=args.train_data_dim_dir,
+        solver_step_size=args.solver_step_size,
+        batch_size=args.batch_size,
+    )
+
+    with torch.inference_mode():
+        for batch_index, conditioning in enumerate(dataloader):
+            batch_start = patch_index
+            conditioning = conditioning.to(device, non_blocking=True)
+            conditioning = resize_conditioning_to_latent(
+                conditioning,
+                (latent_height, latent_width),
+            )
+            latent_noise = torch.randn(
+                (
+                    conditioning.shape[0],
+                    latent_channels,
+                    latent_height,
+                    latent_width,
+                ),
+                device=device,
+                dtype=conditioning.dtype,
+            )
+            sampled_latents = solver.sample(
+                time_grid=time_grid,
+                x_init=latent_noise,
+                return_intermediates=False,
+                step_size=args.solver_step_size,
+                cfg_scale=0.0,
+                label=None,
+                concat_conditioning={"concat_conditioning": conditioning},
+            )
+            with torch.amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
+                reconstructed = vae.model.decode(sampled_latents).sample
+            reconstructed_batches.append(reconstructed.detach().float().cpu())
+            patch_index += int(reconstructed.shape[0])
+            logger.log_valid(
+                batch=batch_index + 1,
+                batch_start=batch_start,
+                batch_end=patch_index,
+                batch_size=int(reconstructed.shape[0]),
+            )
+
+    reconstructed_patches = torch.cat(reconstructed_batches, dim=0)
+    if reconstructed_patches.shape[1] == 1:
+        reconstructed_array = reconstructed_patches.squeeze(1).numpy()
+    else:
+        reconstructed_array = reconstructed_patches.numpy()
+
+    if args.output_npy is None:
+        output_npy = output_dir / "reconstructed_patches.npy"
+    else:
+        output_npy = Path(args.output_npy)
+    if args.output_npy is not None and not output_npy.is_absolute():
+        output_npy = output_dir / output_npy
+    output_npy.parent.mkdir(parents=True, exist_ok=True)
+    np.save(output_npy, reconstructed_array)
+
+    summary_path = output_dir / "summary.txt"
+    summary_lines = [
+        f"checkpoint: {args.ckpt}",
+        f"checkpoint_epoch: {checkpoint_epoch}",
+        f"ckpt_vae: {args.ckpt_vae}",
+        f"train_data_dim_dir: {args.train_data_dim_dir}",
+        f"output_npy: {output_npy}",
+        f"num_patches: {int(reconstructed_array.shape[0])}",
+        f"output_shape: {list(reconstructed_array.shape)}",
+        f"output_min: {float(np.min(reconstructed_array)):.6g}",
+        f"output_max: {float(np.max(reconstructed_array)):.6g}",
+        f"vae_latent_shape: {list(vae_latent_shape)}",
+        f"solver_step_size: {args.solver_step_size}",
+    ]
+    summary_path.write_text("\n".join(summary_lines) + "\n")
+    logger.log_event(
+        "validation_finished",
+        output_npy=str(output_npy),
+        output_shape=list(reconstructed_array.shape),
+        output_min=float(np.min(reconstructed_array)),
+        output_max=float(np.max(reconstructed_array)),
+        summary=str(summary_path),
+    )
+    logger.close()
+
+
 if __name__ == "__main__":
     parser = build_parser()
     parsed_args = parser.parse_args()
     if parsed_args.output_dir:
         Path(parsed_args.output_dir).mkdir(parents=True, exist_ok=True)
-    main(parsed_args)
+    if parsed_args.mode == "valid":
+        run_valid(parsed_args)
+    else:
+        run_train(parsed_args)
