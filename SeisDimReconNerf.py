@@ -134,10 +134,11 @@ def build_parser():
         help="Number of exponential Fourier frequency bands used to encode dimension-coordinate channels.",
     )
     parser.add_argument(
-        "--nerf_include_input",
-        action=argparse.BooleanOptionalAction,
+        "--no-nerf_include_input",
+        dest="nerf_include_input",
+        action="store_false",
         default=True,
-        help="Include the original dimension-coordinate channels together with Fourier sin/cos channels.",
+        help="Do not include the original dimension-coordinate channels; use only Fourier sin/cos channels.",
     )
     parser.add_argument(
         "--num_epochs",
@@ -338,7 +339,7 @@ def encode_nerf_conditioning(conditioning, args):
         encoded.append(torch.cos(phase))
 
     if not encoded:
-        raise ValueError("NeRF conditioning is empty; enable --nerf_include_input or set --nerf_bands > 0.")
+        raise ValueError("NeRF conditioning is empty; remove --no-nerf_include_input or set --nerf_bands > 0.")
     return torch.cat(encoded, dim=1)
 
 
@@ -591,9 +592,6 @@ def run_train(args):
         "dataset_initialized",
         dataset_size=len(dataset),
         dim_channels=int(dim_channels),
-        nerf_dim_channels=int(nerf_dim_channels),
-        nerf_bands=int(args.nerf_bands),
-        nerf_include_input=int(args.nerf_include_input),
         num_batches=len(train_loader),
     )
 
@@ -619,9 +617,6 @@ def run_train(args):
         dataset_size=len(dataset),
         num_batches=len(train_loader),
         dim_channels=int(dim_channels),
-        nerf_dim_channels=int(nerf_dim_channels),
-        nerf_bands=int(args.nerf_bands),
-        nerf_include_input=int(args.nerf_include_input),
         total_params=total_params,
         trainable_params=trainable_params,
         frozen_params=frozen_params,
@@ -777,9 +772,6 @@ def run_valid(args):
         "valid_dataset_initialized",
         dataset_size=len(dataset),
         dim_channels=int(dim_channels),
-        nerf_dim_channels=int(nerf_dim_channels),
-        nerf_bands=int(args.nerf_bands),
-        nerf_include_input=int(args.nerf_include_input),
         total_files=len(dataset.patch_files),
         rank_files=len(rank_files),
         rank=distributed_mode.get_rank(),
@@ -798,9 +790,6 @@ def run_valid(args):
         solver_step_size=args.solver_step_size,
         clip_recon="" if args.clip_recon is None else list(args.clip_recon),
         batch_size=args.batch_size,
-        nerf_dim_channels=int(nerf_dim_channels),
-        nerf_bands=int(args.nerf_bands),
-        nerf_include_input=int(args.nerf_include_input),
         rank=distributed_mode.get_rank(),
         world_size=distributed_mode.get_world_size(),
     )
