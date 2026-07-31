@@ -153,8 +153,10 @@ def load_six_volumes(dataset, shot_index, slice_range, clip_range):
             f"Expected SegyDataset sample with shape [5, H, W], got {sample.shape}."
         )
 
+    sample_start = 0
     if slice_range != [0, 0]:
         start, end = slice_range
+        sample_start = start
         sample = sample[:, :, start:end]
 
     seismic = sample[0].copy()
@@ -163,7 +165,7 @@ def load_six_volumes(dataset, shot_index, slice_range, clip_range):
 
     height, width = seismic.shape
     t = np.broadcast_to(
-        np.arange(width, dtype=np.float32)[None, :],
+        np.arange(sample_start, sample_start + width, dtype=np.float32)[None, :],
         (height, width),
     ).copy()
 
@@ -174,9 +176,11 @@ def load_six_volumes(dataset, shot_index, slice_range, clip_range):
 
 
 def scan_global_min_max(dataset, args):
-    """Scan post-clip/post-slice global min/max for seismic only."""
+    """Scan seismic extrema and grouped global coordinate extrema."""
     seismic_min = np.inf
     seismic_max = -np.inf
+    coord_min = np.full(3, np.inf, dtype=np.float64)  # x, y, t
+    coord_max = np.full(3, -np.inf, dtype=np.float64)
 
     for shot_index in range(len(dataset)):
         volumes = load_six_volumes(
@@ -187,10 +191,34 @@ def scan_global_min_max(dataset, args):
         )
         seismic_min = min(seismic_min, float(volumes[0].min()))
         seismic_max = max(seismic_max, float(volumes[0].max()))
+        coord_min[0] = min(
+            coord_min[0],
+            float(volumes[1].min()),
+            float(volumes[3].min()),
+        )
+        coord_max[0] = max(
+            coord_max[0],
+            float(volumes[1].max()),
+            float(volumes[3].max()),
+        )
+        coord_min[1] = min(
+            coord_min[1],
+            float(volumes[2].min()),
+            float(volumes[4].min()),
+        )
+        coord_max[1] = max(
+            coord_max[1],
+            float(volumes[2].max()),
+            float(volumes[4].max()),
+        )
+        coord_min[2] = min(coord_min[2], float(volumes[5].min()))
+        coord_max[2] = max(coord_max[2], float(volumes[5].max()))
 
     if not np.isfinite([seismic_min, seismic_max]).all():
         raise RuntimeError("Failed to scan global seismic min/max values.")
-    return seismic_min, seismic_max
+    if not np.isfinite(coord_min).all() or not np.isfinite(coord_max).all():
+        raise RuntimeError("Failed to scan global coordinate min/max values.")
+    return seismic_min, seismic_max, coord_min, coord_max
 
 
 def normalize_volume_preserve_zero(volume, minimum, maximum):
@@ -204,16 +232,38 @@ def normalize_volume_preserve_zero(volume, minimum, maximum):
     return volume
 
 
-def preprocess_volume(volumes, seismic_min, seismic_max, normalize):
-    if not normalize:
-        return volumes.astype(np.float32, copy=False)
+def normalize_coordinate(values, minimum, maximum):
+    """Map a coordinate to [-1, 1] using one shared global range."""
+    denominator = float(maximum) - float(minimum)
+    if denominator == 0:
+        return np.zeros_like(values, dtype=np.float32)
+    return (
+        2.0 * (values.astype(np.float32) - float(minimum)) / denominator - 1.0
+    ).astype(np.float32)
 
+
+def preprocess_volume(
+    volumes,
+    seismic_min,
+    seismic_max,
+    coord_min,
+    coord_max,
+    normalize,
+):
     processed = volumes.astype(np.float32, copy=True)
-    processed[0] = normalize_volume_preserve_zero(
-        processed[0],
-        seismic_min,
-        seismic_max,
-    )
+    if normalize:
+        processed[0] = normalize_volume_preserve_zero(
+            processed[0],
+            seismic_min,
+            seismic_max,
+        )
+
+    # SX/RX share X statistics, SY/RY share Y statistics, and T has its own.
+    processed[1] = normalize_coordinate(processed[1], coord_min[0], coord_max[0])
+    processed[3] = normalize_coordinate(processed[3], coord_min[0], coord_max[0])
+    processed[2] = normalize_coordinate(processed[2], coord_min[1], coord_max[1])
+    processed[4] = normalize_coordinate(processed[4], coord_min[1], coord_max[1])
+    processed[5] = normalize_coordinate(processed[5], coord_min[2], coord_max[2])
     return processed
 
 
@@ -288,12 +338,16 @@ def save_metadata(
     positions,
     original_shape,
     scale,
+    coord_min,
+    coord_max,
 ):
     np.savez(
         output_file,
         positions=np.asarray(positions, dtype=np.int64),
         original_shape=np.asarray(original_shape, dtype=np.int64),
         global_scale=np.asarray(scale, dtype=np.float32),
+        global_coord_min=np.asarray(coord_min, dtype=np.float32),
+        global_coord_max=np.asarray(coord_max, dtype=np.float32),
     )
 
 
@@ -368,9 +422,14 @@ def build_dataset(args):
         f"valid: {len(valid_indices)}"
     )
 
-    seismic_min, seismic_max = scan_global_min_max(dataset, args)
+    seismic_min, seismic_max, coord_min, coord_max = scan_global_min_max(
+        dataset,
+        args,
+    )
     print("Global seismic min/max after clip/slice:")
     print(f"  seismic: min={seismic_min:.7g}, max={seismic_max:.7g}")
+    print("Global coordinate min/max [x, y, t]:")
+    print(f"  min={coord_min}, max={coord_max}")
 
     seismic_scale = max(abs(seismic_min), abs(seismic_max))
 
@@ -388,6 +447,8 @@ def build_dataset(args):
             raw_volumes,
             seismic_min,
             seismic_max,
+            coord_min,
+            coord_max,
             args.normalize,
         )
         six_patches, positions, _ = extract_patches(
@@ -428,6 +489,8 @@ def build_dataset(args):
             positions,
             original_shape=processed.shape[1:],
             scale=seismic_scale,
+            coord_min=coord_min,
+            coord_max=coord_max,
         )
 
         shot_number = dataset.shot_keys[shot_index]
