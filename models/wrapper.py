@@ -1,9 +1,11 @@
-import math
 from pathlib import Path
 
+import math
 import torch
 from diffusers.models import AutoencoderKL, DiTTransformer2DModel
 from torch import nn
+
+from models.pixeldit import PixDiT
 
 TRAINING_STATE_NAME = "training_state.pth"
 
@@ -97,6 +99,33 @@ DIT_TRANSFORMER_2D_CONFIGS = {
         "attention_head_dim": 64,
         "num_attention_heads": 6,
         "patch_size": 8,
+    },
+}
+
+Pixel_DiT_2D_CONFIGS = {
+    "PixelDiT_XL": {
+        "num_groups": 16,
+        "hidden_size": 1152,
+        "patch_depth": 28,
+        "pixel_depth": 4,
+    },
+    "PixelDiT_L": {
+        "num_groups": 16,
+        "hidden_size": 1024,
+        "patch_depth": 24,
+        "pixel_depth": 4,
+    },
+    "PixelDiT_S": {
+        "num_groups": 12,
+        "hidden_size": 768,
+        "patch_depth": 12,
+        "pixel_depth": 2,
+    },
+    "PixelDiT_T": {
+        "num_groups": 6,
+        "hidden_size": 384,
+        "patch_depth": 8,
+        "pixel_depth": 2,
     },
 }
 
@@ -463,6 +492,153 @@ def build_dit_transformer_2d_wrapper(
         norm_eps=norm_eps,
     )
     wrapper = DiTTransformer2DWrapper(model)
+    if device is not None:
+        wrapper = wrapper.to(device)
+    return wrapper
+
+
+class PixelDiT2DWrapper(nn.Module):
+    """Wrapper that exposes a common training/checkpoint interface for ``PixDiT``."""
+
+    def __init__(self, model: PixDiT):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x, timesteps, extra=None):
+        if extra is None:
+            extra = {}
+
+        conditioning = extra.get("concat_conditioning")
+        if conditioning is not None:
+            x = torch.cat((x, conditioning), dim=1)
+
+        labels = extra.get("label")
+        if labels is None:
+            labels = torch.zeros(
+                x.shape[0],
+                dtype=torch.long,
+                device=x.device,
+            )
+
+        output = self.model(
+            x,
+            timesteps,
+            labels,
+            s=extra.get("s"),
+            mask=extra.get("mask"),
+        )
+
+        return output
+
+    def save_pretrained(self, save_directory, **kwargs):
+        self.model.save_pretrained(save_directory, **kwargs)
+
+    @classmethod
+    def from_pretrained(cls, save_directory, device=None, **kwargs):
+        model = PixDiT.from_pretrained(
+            save_directory,
+            local_files_only=True,
+            **kwargs,
+        )
+        if device is not None:
+            model = model.to(device)
+        return cls(model)
+
+    def save_training(
+            self,
+            save_directory,
+            optimizer=None,
+            lr_scheduler=None,
+            scaler=None,
+            args=None,
+            epoch=None,
+    ):
+        save_directory = Path(save_directory)
+        self.save_pretrained(save_directory)
+
+        training_state = {}
+        if epoch is not None:
+            training_state["epoch"] = epoch
+        if optimizer is not None:
+            training_state["optimizer"] = optimizer.state_dict()
+        if lr_scheduler is not None:
+            training_state["lr_scheduler"] = lr_scheduler.state_dict()
+        if scaler is not None:
+            training_state["amp_scaler"] = scaler.state_dict()
+        if args is not None:
+            training_state["args"] = vars(args)
+        torch.save(training_state, save_directory / TRAINING_STATE_NAME)
+
+    @classmethod
+    def from_training(
+            cls,
+            save_directory,
+            optimizer=None,
+            lr_scheduler=None,
+            scaler=None,
+            device=None,
+    ):
+        save_directory = Path(save_directory)
+        training_state_path = save_directory / TRAINING_STATE_NAME
+        if not training_state_path.is_file():
+            raise FileNotFoundError(
+                f"Training state file not found: {training_state_path}"
+            )
+
+        map_location = device if device is not None else "cpu"
+        wrapper = cls.from_pretrained(save_directory, device=device)
+
+        try:
+            training_state = torch.load(
+                training_state_path,
+                map_location=map_location,
+                weights_only=False,
+            )
+        except TypeError:
+            training_state = torch.load(
+                training_state_path,
+                map_location=map_location,
+            )
+
+        if optimizer is not None and training_state.get("optimizer"):
+            optimizer.load_state_dict(training_state["optimizer"])
+        if lr_scheduler is not None and training_state.get("lr_scheduler"):
+            lr_scheduler.load_state_dict(training_state["lr_scheduler"])
+        if scaler is not None and training_state.get("amp_scaler"):
+            scaler.load_state_dict(training_state["amp_scaler"])
+
+        return wrapper, int(training_state.get("epoch", 0)), training_state
+
+
+def build_pixeldit_2d_wrapper(
+        in_channels=4,
+        out_channels=None,
+        num_groups=16,
+        hidden_size=1152,
+        pixel_hidden_size=16,
+        patch_depth=26,
+        pixel_depth=4,
+        patch_size=16,
+        num_classes=1000,
+        use_pixel_abs_pos=True,
+        pit_adaln_post_modulation=False,
+        device=None,
+):
+    """Build a ``PixDiT`` model with the common project wrapper interface."""
+    model = PixDiT(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        num_groups=num_groups,
+        hidden_size=hidden_size,
+        pixel_hidden_size=pixel_hidden_size,
+        patch_depth=patch_depth,
+        pixel_depth=pixel_depth,
+        patch_size=patch_size,
+        num_classes=num_classes,
+        use_pixel_abs_pos=use_pixel_abs_pos,
+        pit_adaln_post_modulation=pit_adaln_post_modulation,
+    )
+    wrapper = PixelDiT2DWrapper(model)
     if device is not None:
         wrapper = wrapper.to(device)
     return wrapper
