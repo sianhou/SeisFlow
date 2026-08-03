@@ -429,6 +429,7 @@ class PixDiT(ModelMixin, ConfigMixin):
     def __init__(
             self,
             in_channels=4,
+            out_channels=None,
             num_groups=12,
             hidden_size=1152,
             pixel_hidden_size=64,
@@ -441,7 +442,7 @@ class PixDiT(ModelMixin, ConfigMixin):
     ):
         super().__init__()
         self.in_channels = int(in_channels)
-        self.out_channels = int(in_channels)
+        self.out_channels = int(in_channels) if out_channels is None else int(out_channels)
         self.hidden_size = int(hidden_size)
         self.num_groups = int(num_groups)
         self.patch_depth = int(patch_depth)
