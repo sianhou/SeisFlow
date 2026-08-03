@@ -1,5 +1,6 @@
 import argparse
 import gc
+import json
 import time
 from pathlib import Path
 
@@ -15,8 +16,11 @@ from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from models.wrapper import (
     DIT_TRANSFORMER_2D_CONFIGS,
+    Pixel_DiT_2D_CONFIGS,
     DiTTransformer2DWrapper,
+    PixelDiT2DWrapper,
     build_dit_transformer_2d_wrapper,
+    build_pixeldit_2d_wrapper,
 )
 from training import distributed_mode
 
@@ -26,6 +30,35 @@ class RawDefaultsHelpFormatter(
     argparse.RawDescriptionHelpFormatter,
 ):
     pass
+
+
+def get_model_wrapper_class(model_arch):
+    if model_arch in DIT_TRANSFORMER_2D_CONFIGS:
+        return DiTTransformer2DWrapper
+    if model_arch in Pixel_DiT_2D_CONFIGS:
+        return PixelDiT2DWrapper
+    raise ValueError(f"Unsupported model architecture: {model_arch!r}")
+
+
+def load_model_wrapper_from_training(save_directory, model_arch=None, device=None):
+    """Load the appropriate wrapper, auto-detecting PixDiT checkpoints."""
+    checkpoint_config = Path(save_directory) / "config.json"
+    detected_arch = None
+    if checkpoint_config.is_file():
+        with checkpoint_config.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+        if config.get("_class_name") == "PixDiT":
+            detected_arch = "PixelDiT"
+
+    if detected_arch == "PixelDiT":
+        wrapper_class = PixelDiT2DWrapper
+    else:
+        wrapper_class = get_model_wrapper_class(model_arch or "DiT_T_4")
+
+    return wrapper_class.from_training(
+        save_directory=save_directory,
+        device=device,
+    )
 
 
 def build_parser():
@@ -75,9 +108,12 @@ def build_parser():
     )
     parser.add_argument(
         "--model_arch",
-        choices=sorted(DIT_TRANSFORMER_2D_CONFIGS.keys()),
+        choices=sorted(
+            set(DIT_TRANSFORMER_2D_CONFIGS.keys())
+            | set(Pixel_DiT_2D_CONFIGS.keys())
+        ),
         default="DiT_T_4",
-        help="Model architecture to train.",
+        help="Model architecture to train; supports DiT and PixelDiT presets.",
     )
     parser.add_argument(
         "--input_size",
@@ -300,7 +336,12 @@ def validate_valid_args(args):
 def validate_dim_model_channels(model, dim_channels):
     expected_model_in_channels = 1 + dim_channels
     model_in_channels = int(model.model.config.in_channels)
-    model_out_channels = int(model.model.config.out_channels)
+    configured_out_channels = getattr(model.model.config, "out_channels", None)
+    model_out_channels = int(
+        model.model.out_channels
+        if configured_out_channels is None
+        else configured_out_channels
+    )
     if model_in_channels != expected_model_in_channels:
         raise ValueError(
             "Checkpoint input channel count does not match image + dim data: "
@@ -596,15 +637,24 @@ def run_train(args):
     )
 
     logger.log_event("model_initializing", model_arch=args.model_arch)
-    model = build_dit_transformer_2d_wrapper(
-        model_arch=args.model_arch,
-        in_channels=1 + nerf_dim_channels,
-        out_channels=1,
-        sample_size=args.input_size,
-        num_embeds_ada_norm=1,
-        upcast_attention=args.upcast_attention,
-        device=device,
-    )
+    if args.model_arch in Pixel_DiT_2D_CONFIGS:
+        model = build_pixeldit_2d_wrapper(
+            model_arch=args.model_arch,
+            in_channels=1 + nerf_dim_channels,
+            out_channels=1,
+            num_classes=1,
+            device=device,
+        )
+    else:
+        model = build_dit_transformer_2d_wrapper(
+            model_arch=args.model_arch,
+            in_channels=1 + nerf_dim_channels,
+            out_channels=1,
+            sample_size=args.input_size,
+            num_embeds_ada_norm=1,
+            upcast_attention=args.upcast_attention,
+            device=device,
+        )
     model_without_ddp = model
 
     total_params, trainable_params, frozen_params = count_model_parameters(model_without_ddp)
@@ -665,7 +715,7 @@ def run_train(args):
     if args.ckpt:
         logger.log_event("checkpoint_loading", path=args.ckpt)
         loaded_model, start_epoch, training_state = (
-            DiTTransformer2DWrapper.from_training(
+            get_model_wrapper_class(args.model_arch).from_training(
                 save_directory=args.ckpt,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
@@ -751,8 +801,9 @@ def run_valid(args):
     np.random.seed(seed)
 
     logger.log_event("checkpoint_loading", path=args.ckpt)
-    model, checkpoint_epoch, training_state = DiTTransformer2DWrapper.from_training(
+    model, checkpoint_epoch, training_state = load_model_wrapper_from_training(
         save_directory=args.ckpt,
+        model_arch=args.model_arch,
         device=device,
     )
     del training_state
