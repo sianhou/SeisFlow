@@ -5,6 +5,7 @@ import torch
 from diffusers.models import AutoencoderKL, DiTTransformer2DModel
 from torch import nn
 
+from core.training.model_utils import count_model_parameters
 from models.pixeldit import PixDiT
 
 TRAINING_STATE_NAME = "training_state.pth"
@@ -611,20 +612,38 @@ class PixelDiT2DWrapper(nn.Module):
 
 
 def build_pixeldit_2d_wrapper(
+        model_arch="PixelDiT_XL",
         in_channels=4,
         out_channels=None,
-        num_groups=16,
-        hidden_size=1152,
+        num_groups=None,
+        hidden_size=None,
         pixel_hidden_size=16,
-        patch_depth=26,
-        pixel_depth=4,
+        patch_depth=None,
+        pixel_depth=None,
         patch_size=16,
         num_classes=1000,
         use_pixel_abs_pos=True,
         pit_adaln_post_modulation=False,
         device=None,
 ):
-    """Build a ``PixDiT`` model with the common project wrapper interface."""
+    """Build a ``PixDiT`` model from a named architecture preset.
+
+    The preset supplies the patch-level transformer width/depth. Explicit
+    values for those arguments override the preset when provided.
+    """
+    if model_arch not in Pixel_DiT_2D_CONFIGS:
+        supported = ", ".join(sorted(Pixel_DiT_2D_CONFIGS))
+        raise ValueError(
+            f"Unsupported PixelDiT architecture {model_arch!r}. "
+            f"Supported architectures: {supported}."
+        )
+
+    architecture = Pixel_DiT_2D_CONFIGS[model_arch]
+    num_groups = architecture["num_groups"] if num_groups is None else num_groups
+    hidden_size = architecture["hidden_size"] if hidden_size is None else hidden_size
+    patch_depth = architecture["patch_depth"] if patch_depth is None else patch_depth
+    pixel_depth = architecture["pixel_depth"] if pixel_depth is None else pixel_depth
+
     model = PixDiT(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -645,6 +664,40 @@ def build_pixeldit_2d_wrapper(
 
 
 if __name__ == "__main__":
+    # Print parameter counts for every configured architecture.  Meta tensors
+    # avoid allocating the large model weights just for this inspection.
+    print("DiTTransformer2D configurations:")
+    with torch.device("meta"):
+        for model_arch in DIT_TRANSFORMER_2D_CONFIGS:
+            model = build_dit_transformer_2d_wrapper(
+                model_arch=model_arch,
+                in_channels=4,
+                out_channels=4,
+                sample_size=32,
+                num_embeds_ada_norm=1000,
+                device="meta",
+            )
+            total_params, trainable_params, frozen_params = count_model_parameters(model)
+            print(
+                f"  {model_arch}: total={total_params:,}, "
+                f"trainable={trainable_params:,}, frozen={frozen_params:,}"
+            )
+
+    print("PixelDiT configurations:")
+    with torch.device("meta"):
+        for model_arch in Pixel_DiT_2D_CONFIGS:
+            model = build_pixeldit_2d_wrapper(
+                model_arch=model_arch,
+                in_channels=4,
+                out_channels=4,
+                device="meta",
+            )
+            total_params, trainable_params, frozen_params = count_model_parameters(model)
+            print(
+                f"  {model_arch}: total={total_params:,}, "
+                f"trainable={trainable_params:,}, frozen={frozen_params:,}"
+            )
+
     x = torch.randn(2, 3, 32, 32)
     timesteps = torch.randint(0, 1000, (2,))
 
@@ -675,3 +728,11 @@ if __name__ == "__main__":
     }
     output = model(x, timesteps, extra)
     print("Concat conditioning output:", output.shape)
+
+    model = build_pixeldit_2d_wrapper(
+        model_arch="PixelDiT_XL",
+        in_channels=3,
+        out_channels=3,
+    )
+    output = model(x, timesteps)
+    print("PixelDiT output:", output.shape)
