@@ -6,6 +6,7 @@ from diffusers.models import AutoencoderKL, DiTTransformer2DModel
 from torch import nn
 
 from core.training.model_utils import count_model_parameters
+from flow_matching.utils import ModelWrapper
 from models.pixeldit import PixDiT
 
 TRAINING_STATE_NAME = "training_state.pth"
@@ -129,6 +130,29 @@ Pixel_DiT_2D_CONFIGS = {
         "pixel_depth": 2,
     },
 }
+
+
+class VelocityModel(ModelWrapper):
+    """Adapt a conditional velocity model to the ODE solver interface."""
+
+    def __init__(self, model):
+        super().__init__(model)
+
+    def forward(self, x, t, cfg_scale, label, concat_conditioning):
+        del cfg_scale, label
+
+        if t.ndim == 0:
+            t = torch.full((x.shape[0],), float(t), device=x.device, dtype=x.dtype)
+        else:
+            t = t.to(device=x.device, dtype=x.dtype).expand(x.shape[0])
+
+        with torch.inference_mode():
+            with torch.amp.autocast(
+                    device_type=x.device.type,
+                    enabled=x.device.type == "cuda",
+            ):
+                result = self.model(x, t, extra=concat_conditioning)
+        return result.to(dtype=torch.float32)
 
 
 class AutoencoderKLWrapper(nn.Module):

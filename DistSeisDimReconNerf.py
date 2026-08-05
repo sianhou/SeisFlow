@@ -11,11 +11,11 @@ from core.dataset import PairedPatchDataset, PatchDataset
 from core.training import DistributedInference, DistributedTrainer
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
-from flow_matching.utils import ModelWrapper
 from models.wrapper import (
     DIT_TRANSFORMER_2D_CONFIGS,
     DiTTransformer2DWrapper,
     build_dit_transformer_2d_wrapper,
+    VelocityModel,
 )
 
 
@@ -56,8 +56,8 @@ class SeisDimReconNerfTrainer(DistributedTrainer):
 
     def build_training_dataset(self):
         return PairedPatchDataset(
-            self.args.train_data_dir,
-            self.args.train_data_dim_dir,
+            self.args.input_dir,
+            self.args.input_dim_dir,
         )
 
     def build_model(self):
@@ -136,8 +136,8 @@ class SeisDimReconNerfTrainer(DistributedTrainer):
 
             scaled_loss = loss / accum_steps
             should_step = (
-                (step + 1) % self.args.grad_accum_steps == 0
-                or step + 1 == total_steps
+                    (step + 1) % self.args.grad_accum_steps == 0
+                    or step + 1 == total_steps
             )
             step_start_time = time.time()
             clip_grad = self.args.clip_grad if self.args.clip_grad > 0 else None
@@ -165,37 +165,40 @@ class SeisDimReconNerfTrainer(DistributedTrainer):
         return epoch_loss / max(epoch_steps, 1)
 
     def validate_train_args(self):
-        validate_train_args(self.args)
-
-
-class DimVelocityModel(ModelWrapper):
-    def __init__(self, model):
-        super().__init__(model)
-
-    def forward(
-        self,
-        x,
-        t,
-        cfg_scale,
-        label,
-        concat_conditioning,
-    ):
-        del cfg_scale, label
-
-        if t.ndim == 0:
-            t = torch.full((x.shape[0],), float(t), device=x.device, dtype=x.dtype)
-        else:
-            t = t.to(device=x.device, dtype=x.dtype).expand(x.shape[0])
-
-        with torch.inference_mode():
-            with torch.amp.autocast(device_type=x.device.type, enabled=x.device.type == "cuda"):
-                result = self.model(x, t, extra=concat_conditioning)
-        return result.to(dtype=torch.float32)
+        args = self.args
+        if not Path(args.input_dir).is_dir():
+            raise FileNotFoundError(f"--input_dir must be a directory, got {args.input_dir}.")
+        if not Path(args.input_dim_dir).is_dir():
+            raise FileNotFoundError(
+                f"--input_dim_dir must be a directory, got {args.input_dim_dir}."
+            )
+        if args.ckpt is not None and not Path(args.ckpt).is_dir():
+            raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
+        if args.input_size <= 0:
+            raise ValueError("--input_size must be positive.")
+        if args.batch_size <= 0:
+            raise ValueError("--batch_size must be positive.")
+        if args.grad_accum_steps <= 0:
+            raise ValueError("--grad_accum_steps must be positive.")
+        if args.nerf_bands < 0:
+            raise ValueError("--nerf_bands must be non-negative.")
+        if args.num_epochs <= 0:
+            raise ValueError("--num_epochs must be positive.")
+        if args.learning_rate <= 0:
+            raise ValueError("--learning_rate must be positive.")
+        if args.num_workers < 0:
+            raise ValueError("--num_workers must be non-negative.")
+        if args.save_every_epochs <= 0:
+            raise ValueError("--save_every_epochs must be positive.")
+        if not 0.0 <= args.adam_beta1 < 1.0:
+            raise ValueError("--adam_beta1 must be in [0, 1).")
+        if not 0.0 <= args.adam_beta2 < 1.0:
+            raise ValueError("--adam_beta2 must be in [0, 1).")
 
 
 class SeisDimReconNerfInference(DistributedInference):
     def build_inference_dataset(self):
-        return PatchDataset(self.args.train_data_dim_dir)
+        return PatchDataset(self.args.input_dim_dir)
 
     def get_inference_items(self):
         return self.dataset.patch_files
@@ -209,7 +212,9 @@ class SeisDimReconNerfInference(DistributedInference):
 
         raw_dim_channels = int(self.dataset[0].shape[0])
         nerf_dim_channels = self.validate_model_channels(raw_dim_channels)
-        self.solver = ODESolver(velocity_model=DimVelocityModel(self.model).to(self.device))
+        self.solver = ODESolver(
+            velocity_model=VelocityModel(self.model).to(self.device)
+        )
         self.time_grid = torch.tensor([0.0, 1.0], device=self.device)
 
         self.logger.log_event(
@@ -370,59 +375,25 @@ class SeisDimReconNerfInference(DistributedInference):
         )
 
     def validate_args(self):
-        validate_valid_args(self.args)
-
-
-def validate_train_args(args):
-    if not Path(args.train_data_dir).is_dir():
-        raise FileNotFoundError(f"--train_data_dir must be a directory, got {args.train_data_dir}.")
-    if not Path(args.train_data_dim_dir).is_dir():
-        raise FileNotFoundError(
-            f"--train_data_dim_dir must be a directory, got {args.train_data_dim_dir}."
-        )
-    if args.ckpt is not None and not Path(args.ckpt).is_dir():
-        raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-    if args.input_size <= 0:
-        raise ValueError("--input_size must be positive.")
-    if args.batch_size <= 0:
-        raise ValueError("--batch_size must be positive.")
-    if args.grad_accum_steps <= 0:
-        raise ValueError("--grad_accum_steps must be positive.")
-    if args.nerf_bands < 0:
-        raise ValueError("--nerf_bands must be non-negative.")
-    if args.num_epochs <= 0:
-        raise ValueError("--num_epochs must be positive.")
-    if args.learning_rate <= 0:
-        raise ValueError("--learning_rate must be positive.")
-    if args.num_workers < 0:
-        raise ValueError("--num_workers must be non-negative.")
-    if args.save_every_epochs <= 0:
-        raise ValueError("--save_every_epochs must be positive.")
-    if not 0.0 <= args.adam_beta1 < 1.0:
-        raise ValueError("--adam_beta1 must be in [0, 1).")
-    if not 0.0 <= args.adam_beta2 < 1.0:
-        raise ValueError("--adam_beta2 must be in [0, 1).")
-
-
-def validate_valid_args(args):
-    if args.ckpt is None:
-        raise ValueError("--ckpt is required in valid mode.")
-    if not Path(args.ckpt).is_dir():
-        raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-    if not Path(args.train_data_dim_dir).is_dir():
-        raise FileNotFoundError(
-            f"--train_data_dim_dir must be a directory, got {args.train_data_dim_dir}."
-        )
-    if args.batch_size <= 0:
-        raise ValueError("--batch_size must be positive.")
-    if args.nerf_bands < 0:
-        raise ValueError("--nerf_bands must be non-negative.")
-    if args.num_workers < 0:
-        raise ValueError("--num_workers must be non-negative.")
-    if args.solver_step_size <= 0:
-        raise ValueError("--solver_step_size must be positive.")
-    if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
-        raise ValueError("--clip_recon MIN must be smaller than MAX.")
+        args = self.args
+        if args.ckpt is None:
+            raise ValueError("--ckpt is required in valid mode.")
+        if not Path(args.ckpt).is_dir():
+            raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
+        if not Path(args.input_dim_dir).is_dir():
+            raise FileNotFoundError(
+                f"--input_dim_dir must be a directory, got {args.input_dim_dir}."
+            )
+        if args.batch_size <= 0:
+            raise ValueError("--batch_size must be positive.")
+        if args.nerf_bands < 0:
+            raise ValueError("--nerf_bands must be non-negative.")
+        if args.num_workers < 0:
+            raise ValueError("--num_workers must be non-negative.")
+        if args.solver_step_size <= 0:
+            raise ValueError("--solver_step_size must be positive.")
+        if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
+            raise ValueError("--clip_recon MIN must be smaller than MAX.")
 
 
 def build_parser():
@@ -435,14 +406,14 @@ def build_parser():
             "Examples:\n"
             "  Train:\n"
             "  torchrun --nproc_per_node=4 DistSeisDimReconNerf.py "
-            "--train_data_dir ./dataset256/train "
-            "--train_data_dim_dir ./dataset256/train_dim "
+            "--input_dir ./dataset256/train "
+            "--input_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_dim_recon "
             "--model_arch DiT_T_4 --input_size 256 --batch_size 32 --num_epochs 1000 --device cuda\n\n"
             "  Valid:\n"
             "  torchrun --nproc_per_node=4 DistSeisDimReconNerf.py valid "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
-            "--train_data_dim_dir ./dataset256/valid_dim "
+            "--input_dim_dir ./dataset256/valid_dim "
             "--output_dir ./seisdimrecon_output "
             "--batch_size 32 --solver_step_size 0.05 --device cuda"
         ),
@@ -455,8 +426,8 @@ def build_parser():
         default="train",
         help="Run mode. Omit for training.",
     )
-    parser.add_argument("--train_data_dir", default="./dataset/train")
-    parser.add_argument("--train_data_dim_dir", default="./dataset/train_dim")
+    parser.add_argument("--input_dir", default="./dataset/train")
+    parser.add_argument("--input_dim_dir", default="./dataset/train_dim")
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument(
         "--model_arch",
@@ -506,22 +477,10 @@ def build_parser():
     return parser
 
 
-def run_train(args):
-    args.mode = "train"
-    trainer = SeisDimReconNerfTrainer(args)
-    return trainer.run()
-
-
-def run_valid(args):
-    args.mode = "valid"
-    inference = SeisDimReconNerfInference(args)
-    return inference.run()
-
-
 def run(args):
     if args.mode == "valid":
-        return run_valid(args)
-    return run_train(args)
+        return SeisDimReconNerfInference(args).run()
+    return SeisDimReconNerfTrainer(args).run()
 
 
 if __name__ == "__main__":
