@@ -105,25 +105,25 @@ DIT_TRANSFORMER_2D_CONFIGS = {
 }
 
 Pixel_DiT_2D_CONFIGS = {
-    "PixelDiT_XL": {
+    "XL": {
         "num_groups": 16,
         "hidden_size": 1152,
-        "patch_depth": 28,
+        "patch_depth": 26,
         "pixel_depth": 4,
     },
-    "PixelDiT_L": {
+    "L": {
         "num_groups": 16,
         "hidden_size": 1024,
-        "patch_depth": 24,
+        "patch_depth": 22,
         "pixel_depth": 4,
     },
-    "PixelDiT_S": {
+    "S": {
         "num_groups": 12,
         "hidden_size": 768,
         "patch_depth": 12,
         "pixel_depth": 2,
     },
-    "PixelDiT_T": {
+    "T": {
         "num_groups": 6,
         "hidden_size": 384,
         "patch_depth": 8,
