@@ -13,9 +13,9 @@ from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
 from models.nerf import get_nerf_conditioning_channels, encode_nerf_conditioning
 from models.wrapper import (
-    DIT_TRANSFORMER_2D_CONFIGS,
-    DiTTransformer2DWrapper,
-    build_dit_transformer_2d_wrapper,
+    Pixel_DiT_2D_CONFIGS,
+    PixelDiT2DWrapper,
+    build_pixeldit_2d_wrapper,
     VelocityModel,
 )
 
@@ -27,7 +27,7 @@ class RawDefaultsHelpFormatter(
     pass
 
 
-class SeisDimReconNerfTrainer(DistributedTrainer):
+class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
     def __init__(self, args):
         super().__init__(args)
         self.flow_path = CondOTProbPath()
@@ -41,20 +41,18 @@ class SeisDimReconNerfTrainer(DistributedTrainer):
     def build_model(self):
         raw_dim_channels = int(self.dataset.dataset1[0].shape[0])
         nerf_dim_channels = get_nerf_conditioning_channels(raw_dim_channels, self.args)
-        return build_dit_transformer_2d_wrapper(
+        return build_pixeldit_2d_wrapper(
             model_arch=self.args.model_arch,
             in_channels=1 + nerf_dim_channels,
             out_channels=1,
-            sample_size=self.args.input_size,
-            num_embeds_ada_norm=1,
-            upcast_attention=self.args.upcast_attention,
+            num_classes=1,
             device=self.device,
         )
 
     def validate_batch(self, clean_images, conditioning):
         if clean_images.shape[1] != 1:
             raise ValueError(
-                "SeisDimReconNerf expects single-channel image patches, "
+                "PixelDiTSeisDimNeRFRecon expects single-channel image patches, "
                 f"got shape {tuple(clean_images.shape)}."
             )
         if clean_images.shape[-2:] != (self.args.input_size, self.args.input_size):
@@ -174,7 +172,7 @@ class SeisDimReconNerfTrainer(DistributedTrainer):
             raise ValueError("--adam_beta2 must be in [0, 1).")
 
 
-class SeisDimReconNerfInference(DistributedInference):
+class PixelDiTSeisDimNeRFReconInference(DistributedInference):
     def build_inference_dataset(self):
         return PatchDataset(self.args.input_dim_dir)
 
@@ -182,7 +180,7 @@ class SeisDimReconNerfInference(DistributedInference):
         return self.dataset.patch_files
 
     def setup_model(self):
-        self.model, checkpoint_epoch, _training_state = DiTTransformer2DWrapper.from_training(
+        self.model, checkpoint_epoch, _training_state = PixelDiT2DWrapper.from_training(
             save_directory=self.args.ckpt,
             device=self.device,
         )
@@ -377,7 +375,7 @@ class SeisDimReconNerfInference(DistributedInference):
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Train or validate a distributed conditional flow-matching model "
+            "Train or validate a distributed PixelDiT flow-matching model "
             "from noise to seismic patches with NeRF-encoded dimension coordinates."
         ),
         epilog=(
@@ -387,7 +385,7 @@ def build_parser():
             "--input_dir ./dataset256/train "
             "--input_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_dim_recon "
-            "--model_arch DiT_T_4 --input_size 256 --batch_size 32 --num_epochs 1000 --device cuda\n\n"
+            "--model_arch T --input_size 256 --batch_size 32 --num_epochs 1000 --device cuda\n\n"
             "  Valid:\n"
             "  torchrun --nproc_per_node=4 DistSeisDimReconNerf.py valid "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
@@ -409,8 +407,8 @@ def build_parser():
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument(
         "--model_arch",
-        choices=sorted(DIT_TRANSFORMER_2D_CONFIGS.keys()),
-        default="DiT_T_4",
+        choices=sorted(Pixel_DiT_2D_CONFIGS.keys()),
+        default="T",
     )
     parser.add_argument("--input_size", default=64, type=int)
     parser.add_argument("--ckpt", default=None)
@@ -457,8 +455,8 @@ def build_parser():
 
 def run(args):
     if args.mode == "valid":
-        return SeisDimReconNerfInference(args).run()
-    return SeisDimReconNerfTrainer(args).run()
+        return PixelDiTSeisDimNeRFReconInference(args).run()
+    return PixelDiTSeisDimNeRFReconTrainer(args).run()
 
 
 if __name__ == "__main__":
