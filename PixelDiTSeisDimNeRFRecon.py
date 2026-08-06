@@ -86,16 +86,6 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
                 "PixelDiTSeisDimNeRFRecon expects single-channel image patches, "
                 f"got shape {tuple(clean_images.shape)}."
             )
-        if clean_images.shape[-2:] != (self.args.input_size, self.args.input_size):
-            raise ValueError(
-                f"Expected {self.args.input_size}x{self.args.input_size} image patches, "
-                f"got shape {tuple(clean_images.shape)}."
-            )
-        if conditioning.shape[-2:] != (self.args.input_size, self.args.input_size):
-            raise ValueError(
-                f"Expected {self.args.input_size}x{self.args.input_size} dimension patches, "
-                f"got shape {tuple(conditioning.shape)}."
-            )
 
     def train_one_epoch(self, epoch):
         gc.collect()
@@ -261,8 +251,6 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
             )
         if args.ckpt is not None and not Path(args.ckpt).is_dir():
             raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-        if args.input_size <= 0:
-            raise ValueError("--input_size must be positive.")
         if args.batch_size <= 0:
             raise ValueError("--batch_size must be positive.")
         if args.grad_accum_steps <= 0:
@@ -526,7 +514,7 @@ def build_parser():
             "--input_dir ./dataset256/train "
             "--input_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_dim_recon "
-            "--model_arch T --input_size 256 --batch_size 32 --num_epochs 1000 --device cuda\n\n"
+            "--model_arch T --batch_size 32 --num_epochs 1000 --device cuda\n\n"
             "  Valid:\n"
             "  torchrun --nproc_per_node=4 DistSeisDimReconNerf.py valid "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
@@ -551,7 +539,6 @@ def build_parser():
         choices=sorted(Pixel_DiT_2D_CONFIGS.keys()),
         default="T",
     )
-    parser.add_argument("--input_size", default=64, type=int)
     parser.add_argument("--ckpt", default=None)
     parser.add_argument("--solver_step_size", default=0.05, type=float)
     parser.add_argument("--clip_recon", nargs=2, type=float, default=None, metavar=("MIN", "MAX"))
