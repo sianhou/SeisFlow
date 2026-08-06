@@ -6,11 +6,13 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from core.dataset import PairedPatchDataset, PatchDataset
 from core.training import DistributedInference, DistributedTrainer
 from flow_matching.path import CondOTProbPath
 from flow_matching.solver import ODESolver
+from models.dinov2 import DINOv2
 from models.nerf import get_nerf_conditioning_channels, encode_nerf_conditioning
 from models.wrapper import (
     Pixel_DiT_2D_CONFIGS,
@@ -31,6 +33,12 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
     def __init__(self, args):
         super().__init__(args)
         self.flow_path = CondOTProbPath()
+        self.dino = None
+        self.repa_projection = None
+
+    @property
+    def repa_enabled(self):
+        return self.args.repa_lambda > 0.0
 
     def build_training_dataset(self):
         return PairedPatchDataset(
@@ -41,13 +49,36 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
     def build_model(self):
         raw_dim_channels = int(self.dataset.dataset1[0].shape[0])
         nerf_dim_channels = get_nerf_conditioning_channels(raw_dim_channels, self.args)
-        return build_pixeldit_2d_wrapper(
+        model = build_pixeldit_2d_wrapper(
             model_arch=self.args.model_arch,
             in_channels=1 + nerf_dim_channels,
             out_channels=1,
             num_classes=1,
             device=self.device,
         )
+
+        if self.repa_enabled:
+            hidden_size = int(model.model.config.hidden_size)
+            self.dino = DINOv2(
+                model_name=self.args.dino_model_name,
+                hub_dir=self.args.dino_hub_dir,
+            ).to(self.device)
+            self.dino.eval()
+            for parameter in self.dino.parameters():
+                parameter.requires_grad_(False)
+
+            dino_hidden_size = int(self.dino.encoder.embed_dim)
+            self.repa_projection = nn.Sequential(
+                nn.Linear(hidden_size, hidden_size),
+                nn.SiLU(),
+                nn.Linear(hidden_size, hidden_size),
+                nn.SiLU(),
+                nn.Linear(hidden_size, dino_hidden_size),
+            ).to(self.device)
+            # Register the projection on the wrapper so the base optimizer sees it.
+            model.repa_projection = self.repa_projection
+
+        return model
 
     def validate_batch(self, clean_images, conditioning):
         if clean_images.shape[1] != 1:
@@ -69,6 +100,8 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
     def train_one_epoch(self, epoch):
         gc.collect()
         self.model.train(True)
+        if self.repa_enabled:
+            self.repa_projection.train(True)
 
         running_loss = 0.0
         running_steps = 0
@@ -96,13 +129,54 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
             noisy_images = flow_sample.x_t
             target_velocity = flow_sample.dx_t
 
-            with torch.amp.autocast(device_type=self.device.type, enabled=self.device.type == "cuda"):
+            repa_loss = torch.zeros((), device=self.device)
+            feature_buffer = []
+            hook_handle = None
+            if self.repa_enabled:
+                patch_blocks = self.model_without_ddp.model.patch_blocks
+                align_index = self.args.repa_align_layer - 1
+                hook_handle = patch_blocks[align_index].register_forward_hook(
+                    lambda module, inputs, output: feature_buffer.append(output)
+                )
+
+            with torch.amp.autocast(
+                device_type=self.device.type,
+                enabled=self.device.type == "cuda",
+            ):
                 predicted_velocity = self.model(
                     noisy_images,
                     timesteps,
                     extra={"concat_conditioning": conditioning},
                 )
-                loss = F.mse_loss(predicted_velocity, target_velocity)
+                fm_loss = F.mse_loss(predicted_velocity, target_velocity)
+
+            if self.repa_enabled:
+                if len(feature_buffer) != 1:
+                    raise RuntimeError(
+                        "REPA hook did not capture exactly one patch feature."
+                    )
+                src_feature = self.repa_projection(feature_buffer[0]).float()
+                dino_input = (clean_images + 1.0) / 2.0
+                dino_input = dino_input[:, 0:1].repeat(1, 3, 1, 1)
+                dino_input = dino_input.clamp(0.0, 1.0)
+                with torch.inference_mode():
+                    dst_feature = self.dino(dino_input).float()
+
+                src_feature, dst_feature = self.match_repa_tokens(
+                    src_feature,
+                    dst_feature,
+                )
+                repa_loss = 1.0 - F.cosine_similarity(
+                    src_feature,
+                    dst_feature,
+                    dim=-1,
+                ).mean()
+                loss = fm_loss + self.args.repa_lambda * repa_loss
+            else:
+                loss = fm_loss
+
+            if hook_handle is not None:
+                hook_handle.remove()
 
             loss_value = float(loss.detach().cpu())
             running_loss += loss_value
@@ -131,6 +205,9 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
                 step=step + 1,
                 steps=total_steps,
                 loss=loss_value,
+                fm_loss=float(fm_loss.detach().cpu()),
+                repa_loss=float(repa_loss.detach().cpu()),
+                repa_lambda=self.args.repa_lambda,
                 avg_loss=running_loss / max(running_steps, 1),
                 lr=self.optimizer.param_groups[0]["lr"],
                 optimizer_step=bool(should_step),
@@ -139,6 +216,40 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
             )
 
         return epoch_loss / max(epoch_steps, 1)
+
+    @staticmethod
+    def match_repa_tokens(src_feature, dst_feature):
+        if src_feature.shape[1] == dst_feature.shape[1]:
+            return src_feature, dst_feature
+
+        batch_size, src_tokens, channels = src_feature.shape
+        dst_tokens = dst_feature.shape[1]
+        src_size = int(src_tokens ** 0.5)
+        dst_size = int(dst_tokens ** 0.5)
+        if src_size * src_size != src_tokens or dst_size * dst_size != dst_tokens:
+            raise ValueError(
+                "REPA token counts must form square grids when resizing: "
+                f"src={src_tokens}, dst={dst_tokens}."
+            )
+        src_spatial = src_feature.view(
+            batch_size, src_size, src_size, channels
+        ).permute(0, 3, 1, 2)
+        if dst_tokens < src_tokens:
+            src_spatial = F.adaptive_avg_pool2d(
+                src_spatial,
+                (dst_size, dst_size),
+            )
+        else:
+            src_spatial = F.interpolate(
+                src_spatial,
+                size=(dst_size, dst_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        src_feature = src_spatial.permute(0, 2, 3, 1).reshape(
+            batch_size, dst_tokens, channels
+        )
+        return src_feature, dst_feature
 
     def validate_train_args(self):
         args = self.args
@@ -170,6 +281,36 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
             raise ValueError("--adam_beta1 must be in [0, 1).")
         if not 0.0 <= args.adam_beta2 < 1.0:
             raise ValueError("--adam_beta2 must be in [0, 1).")
+        if args.repa_lambda < 0.0:
+            raise ValueError("--repa_lambda must be non-negative.")
+        if args.repa_align_layer <= 0:
+            raise ValueError("--repa_align_layer must be positive.")
+
+    def load_checkpoint(self):
+        super().load_checkpoint()
+        if not self.repa_enabled or not self.args.ckpt:
+            return
+        projection_path = Path(self.args.ckpt) / "repa_projection.pth"
+        if not projection_path.is_file():
+            raise FileNotFoundError(
+                f"REPA checkpoint is missing projection weights: {projection_path}"
+            )
+        state = torch.load(
+            projection_path,
+            map_location=self.device,
+            weights_only=True,
+        )
+        self.repa_projection.load_state_dict(state)
+
+    def save_checkpoint(self, epoch):
+        super().save_checkpoint(epoch)
+        if not self.is_main_process or not self.repa_enabled:
+            return
+        checkpoint_path = Path(self.checkpoint_dir) / f"checkpoint_epoch_{epoch:05d}"
+        torch.save(
+            self.repa_projection.state_dict(),
+            checkpoint_path / "repa_projection.pth",
+        )
 
 
 class PixelDiTSeisDimNeRFReconInference(DistributedInference):
@@ -418,6 +559,33 @@ def build_parser():
     parser.add_argument("--grad_accum_steps", default=1, type=int)
     parser.add_argument("--clip_grad", default=1.0, type=float)
     parser.add_argument("--upcast_attention", action="store_true")
+    parser.add_argument(
+        "--repa_lambda",
+        default=0.0,
+        type=float,
+        help="REPA cosine-loss weight; zero disables DINO supervision.",
+    )
+    parser.add_argument(
+        "--repa_align_layer",
+        default=8,
+        type=int,
+        help="1-based PixelDiT patch block used for REPA features.",
+    )
+    parser.add_argument(
+        "--dino_model_name",
+        default="dinov2_vitb14",
+        choices=(
+            "dinov2_vits14",
+            "dinov2_vitb14",
+            "dinov2_vitl14",
+            "dinov2_vitg14",
+        ),
+    )
+    parser.add_argument(
+        "--dino_hub_dir",
+        default="./dinov2_cache",
+        help="Local Torch Hub directory for the DINOv2 teacher.",
+    )
     parser.add_argument(
         "--nerf_bands",
         default=6,
