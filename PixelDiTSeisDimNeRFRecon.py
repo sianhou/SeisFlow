@@ -130,8 +130,8 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
                 )
 
             with torch.amp.autocast(
-                device_type=self.device.type,
-                enabled=self.device.type == "cuda",
+                    device_type=self.device.type,
+                    enabled=self.device.type == "cuda",
             ):
                 predicted_velocity = self.model(
                     noisy_images,
@@ -510,13 +510,13 @@ def build_parser():
         epilog=(
             "Examples:\n"
             "  Train:\n"
-            "  torchrun --nproc_per_node=4 DistSeisDimReconNerf.py "
+            "  torchrun --nproc_per_node=4 DistSeisDimReconNeRF.py "
             "--input_dir ./dataset256/train "
             "--input_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_dim_recon "
             "--model_arch T --batch_size 32 --num_epochs 1000 --device cuda\n\n"
             "  Valid:\n"
-            "  torchrun --nproc_per_node=4 DistSeisDimReconNerf.py valid "
+            "  torchrun --nproc_per_node=4 DistSeisDimReconNeRF.py valid "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
             "--input_dim_dir ./dataset256/valid_dim "
             "--output_dir ./seisdimrecon_output "
