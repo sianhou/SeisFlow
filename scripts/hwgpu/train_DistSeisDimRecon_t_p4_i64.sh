@@ -15,11 +15,14 @@ MASTER_PORT=29500
 
 WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow-main"
 TORCHRUN_BIN="/hwdata/24ydz3d/deeplearning/environments/py313/bin/torchrun"
-LOG_DIR="$WORKDIR/logs/train_recon_dit_t4_i64"
-TRAIN_JOB="DistSeisDimRecon.py \
---train_data_dir /hwdata/24ydz3d/deeplearning/SeisFlow-main/shot_dataset64/train/ \
---train_data_dim_dir /hwdata/24ydz3d/deeplearning/SeisFlow-main/shot_dataset64/train_dim/ \
---output_dir /hwdata/24ydz3d/deeplearning/SeisFlow-main/output_recon_dit_t4_i64/ \
+DATA_DIR="$WORKDIR/temp/shot_dataset64"
+SCRIPT_NAME="$(basename "$0" .sh)"
+RUN_DIR="$WORKDIR/temp/$SCRIPT_NAME"
+LOG_DIR="$RUN_DIR"
+TRAIN_JOB="DistSeisDimRecon.py train \
+--train_data_dir $DATA_DIR/train/ \
+--train_data_dim_dir $DATA_DIR/train_dim/ \
+--output_dir $RUN_DIR/ \
 --model_arch DiT_T_4 \
 --input_size 64 \
 --batch_size 32 \
