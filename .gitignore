@@ -10,3 +10,4 @@ __pycache__/
 # macOS and JetBrains IDE files
 .DS_Store
 .idea/
+/.venv/
