@@ -1052,6 +1052,14 @@ def build_dist_logger(
     )
     if log_node_info:
         logger.log_node_info()
+    runtime_info = {
+        "main_program": os.path.basename(os.path.realpath(job_path)),
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "python_executable": sys.executable,
+    }
+    runtime_info.update(logger._collect_git_info())
+    logger.log_info_block("RUNTIME ENVIRONMENT", runtime_info)
     logger.log_info_block("ARGPARSE PARAMETERS", args)
     return logger
 

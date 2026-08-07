@@ -145,7 +145,7 @@ class PixelDiTSeisDimNeRFReconTrainer(DistributedTrainer):
                     raise RuntimeError(
                         "REPA hook did not capture exactly one patch feature."
                     )
-                src_feature = self.repa_projection(feature_buffer[0]).float()
+                src_feature = self.repa_projection(feature_buffer[0].float())
                 dino_input = (clean_images + 1.0) / 2.0
                 dino_input = dino_input[:, 0:1].repeat(1, 3, 1, 1)
                 dino_input = dino_input.clamp(0.0, 1.0)
