@@ -1,1 +1,12 @@
 /temp/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+*$py.class
+
+# macOS and JetBrains IDE files
+.DS_Store
+.idea/

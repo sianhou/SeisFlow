@@ -33,7 +33,7 @@ sys.modules["torch.distributed"] = dist
 from core.logging.logger import build_dist_logger
 
 
-LOG_ROOT = PROJECT_ROOT / "tests" / "distributed_logger_test_logs"
+LOG_ROOT = PROJECT_ROOT / "temp" / "distributed_logger_test_logs"
 LOG_ID = "build_dist_logger_demo"
 WORLD_SIZE = 2
 
