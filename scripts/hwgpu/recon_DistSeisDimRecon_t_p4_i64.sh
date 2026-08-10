@@ -66,7 +66,7 @@ for epoch in $(seq 100 100 1000); do
         --node_rank=0 \
         --master_addr="$MASTER_ADDR" \
         --master_port="$MASTER_PORT" \
-        DistSeisDimRecon.py valid \
+        DiTSeisDimRecon.py valid \
         --ckpt "$checkpoint_dir" \
         --train_data_dim_dir "$DATA_DIR/valid_dim" \
         --output_dir "$RUN_DIR" \

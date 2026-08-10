@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from recon_shot2 import load_metadata, load_patches
+from old_codes.recon_shot2 import load_metadata, load_patches
 
 
 def reconstruct_from_patches(patches, positions, original_shape):

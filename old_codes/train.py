@@ -17,9 +17,9 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torchvision.datasets as datasets
-from models.model_configs import instantiate_model
-from train_arg_parser import get_args_parser
 
+from models.model_configs import instantiate_model
+from old_codes.train_arg_parser import get_args_parser
 from training import distributed_mode
 from training.data_transform import get_train_transform
 from training.eval_loop import eval_model
@@ -102,7 +102,7 @@ def main(args):
     logger.info(str(model_without_ddp))
 
     eff_batch_size = (
-        args.batch_size * args.accum_iter * distributed_mode.get_world_size()
+            args.batch_size * args.accum_iter * distributed_mode.get_world_size()
     )
 
     logger.info(f"Learning rate: {args.lr:.2e}")
@@ -170,9 +170,9 @@ def main(args):
             }
 
         if args.output_dir and (
-            (args.eval_frequency > 0 and (epoch + 1) % args.eval_frequency == 0)
-            or args.eval_only
-            or args.test_run
+                (args.eval_frequency > 0 and (epoch + 1) % args.eval_frequency == 0)
+                or args.eval_only
+                or args.test_run
         ):
             if not args.eval_only:
                 save_model(
@@ -188,7 +188,7 @@ def main(args):
                 data_loader_train.sampler.set_epoch(0)
             if distributed_mode.is_main_process():
                 fid_samples = args.fid_samples - (num_tasks - 1) * (
-                    args.fid_samples // num_tasks
+                        args.fid_samples // num_tasks
                 )
             else:
                 fid_samples = args.fid_samples // num_tasks
@@ -204,7 +204,7 @@ def main(args):
 
         if args.output_dir and distributed_mode.is_main_process():
             with open(
-                os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8"
+                    os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8"
             ) as f:
                 f.write(json.dumps(log_stats) + "\n")
 

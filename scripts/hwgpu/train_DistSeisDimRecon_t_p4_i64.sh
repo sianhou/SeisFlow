@@ -16,7 +16,7 @@ NUM_NODES=$((NUM_WORKERS + 1))
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
 LOG_DIR="$RUN_DIR"
-TRAIN_JOB="DistSeisDimRecon.py train \
+TRAIN_JOB="DiTSeisDimRecon.py train \
 --train_data_dir $DATA_DIR/train/ \
 --train_data_dim_dir $DATA_DIR/train_dim/ \
 --output_dir $RUN_DIR/ \
