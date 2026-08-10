@@ -51,7 +51,7 @@ for epoch in $(seq 100 100 1000); do
         --output_dir "$RUN_DIR" \
         --log_id "valid_epoch_${epoch_name}" \
         --model_arch DiT_T_2 \
-        --input_size 64 \\
+        --input_size 64 \
         --batch_size 32 \
         --solver_step_size 0.05 \
         --clip_recon -1 1 \
