@@ -130,9 +130,10 @@ def build_parser():
 
 
 def load_train5_checkpoint(checkpoint_dir, device):
-    wrapper, epoch, training_state = DiTTransformer2DWrapper.from_training(
+    wrapper, epoch, training_state = DiTTransformer2DWrapper.from_pretrained(
         save_directory=checkpoint_dir,
         device=device,
+        return_training_state=True,
     )
     return wrapper, epoch, training_state
 

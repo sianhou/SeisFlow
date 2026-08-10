@@ -55,9 +55,10 @@ def load_model_wrapper_from_training(save_directory, model_arch=None, device=Non
     else:
         wrapper_class = get_model_wrapper_class(model_arch or "DiT_T_4")
 
-    return wrapper_class.from_training(
+    return wrapper_class.from_pretrained(
         save_directory=save_directory,
         device=device,
+        return_training_state=True,
     )
 
 
@@ -715,12 +716,13 @@ def run_train(args):
     if args.ckpt:
         logger.log_event("checkpoint_loading", path=args.ckpt)
         loaded_model, start_epoch, training_state = (
-            get_model_wrapper_class(args.model_arch).from_training(
+            get_model_wrapper_class(args.model_arch).from_pretrained(
                 save_directory=args.ckpt,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
                 scaler=scaler,
                 device=device,
+                return_training_state=True,
             )
         )
         model_without_ddp.model.load_state_dict(loaded_model.model.state_dict())
@@ -761,7 +763,7 @@ def run_train(args):
                     Path(checkpoint_dir)
                     / f"checkpoint_epoch_{epoch + 1:05d}"
             )
-            model_without_ddp.save_training(
+            model_without_ddp.save_pretrained(
                 save_directory=checkpoint_path,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,

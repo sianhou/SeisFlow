@@ -74,9 +74,10 @@ def load_dim_patches(path):
 
 def load_checkpoint(checkpoint, device):
     print(f"[valid6] Loading checkpoint: {checkpoint}", flush=True)
-    model, epoch, _ = DiTTransformer2DWrapper.from_training(
+    model, epoch, _ = DiTTransformer2DWrapper.from_pretrained(
         save_directory=checkpoint,
         device=device,
+        return_training_state=True,
     )
     model.eval()
     print(f"[valid6] Loaded checkpoint epoch={epoch}", flush=True)

@@ -615,12 +615,13 @@ def run_train(args):
     if args.ckpt:
         logger.log_event("checkpoint_loading", path=args.ckpt)
         loaded_model, start_epoch, training_state = (
-            DiTTransformer2DWrapper.from_training(
+            DiTTransformer2DWrapper.from_pretrained(
                 save_directory=args.ckpt,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
                 scaler=scaler,
                 device=device,
+                return_training_state=True,
             )
         )
         model_without_ddp.model.load_state_dict(loaded_model.model.state_dict())
@@ -661,7 +662,7 @@ def run_train(args):
                     Path(checkpoint_dir)
                     / f"checkpoint_epoch_{epoch + 1:05d}"
             )
-            model_without_ddp.save_training(
+            model_without_ddp.save_pretrained(
                 save_directory=checkpoint_path,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
@@ -701,9 +702,10 @@ def run_valid(args):
     np.random.seed(seed)
 
     logger.log_event("checkpoint_loading", path=args.ckpt)
-    model, checkpoint_epoch, training_state = DiTTransformer2DWrapper.from_training(
+    model, checkpoint_epoch, training_state = DiTTransformer2DWrapper.from_pretrained(
         save_directory=args.ckpt,
         device=device,
+        return_training_state=True,
     )
     del training_state
     model.eval()

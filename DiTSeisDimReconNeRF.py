@@ -182,9 +182,10 @@ class DiTSeisDimReconNeRFInference(DistributedInference):
         return self.dataset.patch_files
 
     def setup_model(self):
-        self.model, checkpoint_epoch, _training_state = DiTTransformer2DWrapper.from_training(
+        self.model, checkpoint_epoch, _training_state = DiTTransformer2DWrapper.from_pretrained(
             save_directory=self.args.ckpt,
             device=self.device,
+            return_training_state=True,
         )
         self.model.eval()
 

@@ -134,12 +134,13 @@ class DistributedTrainer(ABC):
         if not getattr(self.args, "ckpt", None):
             return
 
-        loaded_model, checkpoint_epoch, _training_state = type(self.model_without_ddp).from_training(
+        loaded_model, checkpoint_epoch, _training_state = type(self.model_without_ddp).from_pretrained(
             save_directory=self.args.ckpt,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
             scaler=self.scaler,
             device=self.device,
+            return_training_state=True,
         )
         self.load_model_state(loaded_model)
         self.start_epoch = int(checkpoint_epoch)
@@ -165,7 +166,7 @@ class DistributedTrainer(ABC):
             return
 
         checkpoint_path = Path(self.checkpoint_dir) / f"checkpoint_epoch_{epoch:05d}"
-        self.model_without_ddp.save_training(
+        self.model_without_ddp.save_pretrained(
             save_directory=checkpoint_path,
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,

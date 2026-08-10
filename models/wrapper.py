@@ -396,21 +396,7 @@ class DiTTransformer2DWrapper(nn.Module):
             return_dict=True,
         ).sample
 
-    def save_pretrained(self, save_directory, **kwargs):
-        self.model.save_pretrained(save_directory, **kwargs)
-
-    @classmethod
-    def from_pretrained(cls, save_directory, device=None, **kwargs):
-        model = DiTTransformer2DModel.from_pretrained(
-            save_directory,
-            local_files_only=True,
-            **kwargs,
-        )
-        if device is not None:
-            model = model.to(device)
-        return cls(model)
-
-    def save_training(
+    def save_pretrained(
             self,
             save_directory,
             optimizer=None,
@@ -418,9 +404,10 @@ class DiTTransformer2DWrapper(nn.Module):
             scaler=None,
             args=None,
             epoch=None,
+            **kwargs,
     ):
         save_directory = Path(save_directory)
-        self.save_pretrained(save_directory)
+        self.model.save_pretrained(save_directory, **kwargs)
 
         training_state = {}
         if epoch is not None:
@@ -433,26 +420,38 @@ class DiTTransformer2DWrapper(nn.Module):
             training_state["amp_scaler"] = scaler.state_dict()
         if args is not None:
             training_state["args"] = vars(args)
-        torch.save(training_state, save_directory / TRAINING_STATE_NAME)
+        if training_state:
+            torch.save(training_state, save_directory / TRAINING_STATE_NAME)
 
     @classmethod
-    def from_training(
+    def from_pretrained(
             cls,
             save_directory,
             optimizer=None,
             lr_scheduler=None,
             scaler=None,
             device=None,
+            return_training_state=False,
+            **kwargs,
     ):
         save_directory = Path(save_directory)
+        model = DiTTransformer2DModel.from_pretrained(
+            save_directory,
+            local_files_only=True,
+            **kwargs,
+        )
+        if device is not None:
+            model = model.to(device)
+        wrapper = cls(model)
+        if not return_training_state:
+            return wrapper
+
         training_state_path = save_directory / TRAINING_STATE_NAME
         if not training_state_path.is_file():
             raise FileNotFoundError(
                 f"Training state file not found: {training_state_path}"
             )
         map_location = device if device is not None else "cpu"
-        wrapper = cls.from_pretrained(save_directory, device=device)
-
         try:
             training_state = torch.load(
                 training_state_path,
@@ -555,21 +554,7 @@ class PixelDiT2DWrapper(nn.Module):
 
         return output
 
-    def save_pretrained(self, save_directory, **kwargs):
-        self.model.save_pretrained(save_directory, **kwargs)
-
-    @classmethod
-    def from_pretrained(cls, save_directory, device=None, **kwargs):
-        model = PixDiT.from_pretrained(
-            save_directory,
-            local_files_only=True,
-            **kwargs,
-        )
-        if device is not None:
-            model = model.to(device)
-        return cls(model)
-
-    def save_training(
+    def save_pretrained(
             self,
             save_directory,
             optimizer=None,
@@ -577,9 +562,10 @@ class PixelDiT2DWrapper(nn.Module):
             scaler=None,
             args=None,
             epoch=None,
+            **kwargs,
     ):
         save_directory = Path(save_directory)
-        self.save_pretrained(save_directory)
+        self.model.save_pretrained(save_directory, **kwargs)
 
         training_state = {}
         if epoch is not None:
@@ -592,18 +578,32 @@ class PixelDiT2DWrapper(nn.Module):
             training_state["amp_scaler"] = scaler.state_dict()
         if args is not None:
             training_state["args"] = vars(args)
-        torch.save(training_state, save_directory / TRAINING_STATE_NAME)
+        if training_state:
+            torch.save(training_state, save_directory / TRAINING_STATE_NAME)
 
     @classmethod
-    def from_training(
+    def from_pretrained(
             cls,
             save_directory,
             optimizer=None,
             lr_scheduler=None,
             scaler=None,
             device=None,
+            return_training_state=False,
+            **kwargs,
     ):
         save_directory = Path(save_directory)
+        model = PixDiT.from_pretrained(
+            save_directory,
+            local_files_only=True,
+            **kwargs,
+        )
+        if device is not None:
+            model = model.to(device)
+        wrapper = cls(model)
+        if not return_training_state:
+            return wrapper
+
         training_state_path = save_directory / TRAINING_STATE_NAME
         if not training_state_path.is_file():
             raise FileNotFoundError(
@@ -611,8 +611,6 @@ class PixelDiT2DWrapper(nn.Module):
             )
 
         map_location = device if device is not None else "cpu"
-        wrapper = cls.from_pretrained(save_directory, device=device)
-
         try:
             training_state = torch.load(
                 training_state_path,
