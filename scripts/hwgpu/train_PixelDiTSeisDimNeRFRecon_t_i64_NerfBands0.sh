@@ -7,25 +7,29 @@ MASTER=$(hostname)
 MASTER_ADDR=$(hostname -I | awk '{print $1}')
 
 # Nodes configuration - ensure master is NOT in this list
-NODES_LIST="clsgpu11,clsgpu12,clsgpu13,clsgpu14,clsgpu15"
+NODES_LIST="clsgpu02,clsgpu03"
 NUM_WORKERS=$(echo "$NODES_LIST" | awk -F',' '{print NF}')
 NUM_NODES=$((NUM_WORKERS + 1))
 NPROC_PER_NODE=4
 MASTER_PORT=29500
 
-WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow-main"
+WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow"
 TORCHRUN_BIN="/hwdata/24ydz3d/deeplearning/environments/py313/bin/torchrun"
-LOG_DIR="$WORKDIR/logs/recon_pixeldit_seis_dim_nerf_recon_l_i64"
+DATA_DIR="$WORKDIR/temp/shot_dataset64"
+SCRIPT_NAME="$(basename "$0" .sh)"
+RUN_DIR="$WORKDIR/temp/$SCRIPT_NAME"
+LOG_DIR="$RUN_DIR"
 TRAIN_JOB="PixelDiTSeisDimNeRFRecon.py train \
---input_dir /hwdata/24ydz3d/deeplearning/SeisFlow-main/shot_dataset64/train/ \
---input_dim_dir /hwdata/24ydz3d/deeplearning/SeisFlow-main/shot_dataset64/train_dim/ \
---output_dir /hwdata/24ydz3d/deeplearning/SeisFlow-main/output_recon_pixeldit_seis_dim_nerf_recon_l_i64/ \
---model_arch L \
+--input_dir $DATA_DIR/train/ \
+--input_dim_dir $DATA_DIR/train_dim/ \
+--output_dir $RUN_DIR/ \
+--model_arch T \
 --batch_size 32 \
---num_epochs 2000 \
+--num_epochs 1001 \
 --save_every_epochs 100 \
 --pin_memory \
 --device cuda \
+--nerf_bands 0 \
 --log_console"
 
 echo "MASTER: $MASTER"
