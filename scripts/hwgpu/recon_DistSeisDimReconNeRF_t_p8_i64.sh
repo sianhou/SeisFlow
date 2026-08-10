@@ -2,17 +2,13 @@
 
 set -euo pipefail
 
-MASTER_ADDR="$(hostname -I | awk '{print $1}')"
-NPROC_PER_NODE=4
-MASTER_PORT=29500
+HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HWGPU_SCRIPT_DIR/env.sh"
 
-WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow"
-TORCHRUN_BIN="/hwdata/24ydz3d/deeplearning/environments/py313/bin/torchrun"
-PYTHON_BIN="/hwdata/24ydz3d/deeplearning/environments/py313/bin/python3.13"
 SCRIPT_NAME="$(basename "$0" .sh)"
-RUN_DIR="$WORKDIR/temp/$SCRIPT_NAME"
-DATA_DIR="$WORKDIR/temp/shot_dataset64"
-TRAIN_ROOT="$WORKDIR/temp/train_DistSeisDimReconNeRF_t_p8_i64"
+RUN_DIR="$CODE_PATH/temp/$SCRIPT_NAME"
+DATA_DIR="$CODE_PATH/temp/shot_dataset64"
+TRAIN_ROOT="$CODE_PATH/temp/train_DistSeisDimReconNeRF_t_p8_i64"
 
 if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
     TRAIN_RUN_DIR="$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
@@ -26,7 +22,7 @@ fi
 [[ -d "$TRAIN_RUN_DIR" ]] || { echo "Training run directory not found: $TRAIN_RUN_DIR" >&2; exit 1; }
 
 mkdir -p "$RUN_DIR"
-cd "$WORKDIR"
+cd "$CODE_PATH"
 
 echo "MASTER_ADDR: $MASTER_ADDR"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
@@ -65,15 +61,14 @@ for epoch in $(seq 100 100 1000); do
         --log_console
 
     echo "Reconstructing shots for epoch $epoch"
-    "$PYTHON_BIN" "$WORKDIR/recon_shot_dataset2.py" \
+    "$PYTHON_BIN" "$CODE_PATH/recon_shot_dataset2.py" \
         --input_dir "$patch_output_dir" \
         --input_aux_dir "$DATA_DIR/valid_aux" \
         --output_dir "$shot_output_dir"
 
     echo "Generating shot differences for epoch $epoch"
-    "$PYTHON_BIN" "$WORKDIR/diff_shot.py" \
+    "$PYTHON_BIN" "$CODE_PATH/diff_shot.py" \
         --input1_dir "$DATA_DIR/shot" \
         --input2_dir "$shot_output_dir" \
         --output_dir "$diff_output_dir"
 done
-

@@ -2,22 +2,17 @@
 
 set -euo pipefail
 
+HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HWGPU_SCRIPT_DIR/env.sh"
+
 # CONFIG NODES
-MASTER=$(hostname)
-MASTER_ADDR=$(hostname -I | awk '{print $1}')
 
 # Nodes configuration - ensure master is NOT in this list
 NODES_LIST="clsgpu14,clsgpu15"
 NUM_WORKERS=$(echo "$NODES_LIST" | awk -F',' '{print NF}')
 NUM_NODES=$((NUM_WORKERS + 1))
-NPROC_PER_NODE=4
-MASTER_PORT=29500
-
-WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow"
-TORCHRUN_BIN="/hwdata/24ydz3d/deeplearning/environments/py313/bin/torchrun"
-DATA_DIR="$WORKDIR/temp/shot_dataset256"
 SCRIPT_NAME="$(basename "$0" .sh)"
-RUN_DIR="$WORKDIR/temp/$SCRIPT_NAME"
+RUN_DIR="$CODE_PATH/temp/$SCRIPT_NAME"
 LOG_DIR="$RUN_DIR"
 TRAIN_JOB="PixelDiTSeisDimNeRFRecon.py train \
 --input_dir $DATA_DIR/train/ \
@@ -44,7 +39,7 @@ mkdir -p "$LOG_DIR"
 rank=1
 for node in $(echo "$NODES_LIST" | tr ',' ' '); do
 	echo "Starting training on $node(rank=$rank)..."
-	ssh "$node" "cd $WORKDIR && \
+	ssh "$node" "cd $CODE_PATH && \
 		$TORCHRUN_BIN \
 		--nnodes=$NUM_NODES \
 		--nproc_per_node=$NPROC_PER_NODE \
@@ -57,7 +52,7 @@ for node in $(echo "$NODES_LIST" | tr ',' ' '); do
 done
 
 echo "Starting training on master(rank=0)..."
-cd "$WORKDIR"
+cd "$CODE_PATH"
 "$TORCHRUN_BIN" \
 	--nnodes="$NUM_NODES" \
 	--nproc_per_node="$NPROC_PER_NODE" \
