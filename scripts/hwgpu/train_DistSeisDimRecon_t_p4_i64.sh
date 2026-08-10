@@ -13,7 +13,7 @@ NUM_NODES=$((NUM_WORKERS + 1))
 NPROC_PER_NODE=4
 MASTER_PORT=29500
 
-WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow-main"
+WORKDIR="/hwdata/24ydz3d/deeplearning/SeisFlow"
 TORCHRUN_BIN="/hwdata/24ydz3d/deeplearning/environments/py313/bin/torchrun"
 DATA_DIR="$WORKDIR/temp/shot_dataset64"
 SCRIPT_NAME="$(basename "$0" .sh)"
