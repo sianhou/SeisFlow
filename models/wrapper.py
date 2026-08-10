@@ -8,8 +8,10 @@ from torch import nn
 from core.training.model_utils import count_model_parameters
 from flow_matching.utils import ModelWrapper
 from models.pixeldit import PixDiT
+from diffusers.training_utils import EMAModel as EMA
 
 TRAINING_STATE_NAME = "training_state.pth"
+EMA_DIR_NAME = "ema"
 
 DIT_TRANSFORMER_2D_CONFIGS = {
     "DiT_XL_2": {
@@ -404,6 +406,7 @@ class DiTTransformer2DWrapper(nn.Module):
             scaler=None,
             args=None,
             epoch=None,
+            ema=None,
             **kwargs,
     ):
         save_directory = Path(save_directory)
@@ -420,6 +423,8 @@ class DiTTransformer2DWrapper(nn.Module):
             training_state["amp_scaler"] = scaler.state_dict()
         if args is not None:
             training_state["args"] = vars(args)
+        if ema is not None:
+            ema.save_pretrained(save_directory / EMA_DIR_NAME)
         if training_state:
             torch.save(training_state, save_directory / TRAINING_STATE_NAME)
 
@@ -432,6 +437,8 @@ class DiTTransformer2DWrapper(nn.Module):
             scaler=None,
             device=None,
             return_training_state=False,
+            ema=None,
+            use_ema=False,
             **kwargs,
     ):
         save_directory = Path(save_directory)
@@ -470,6 +477,18 @@ class DiTTransformer2DWrapper(nn.Module):
             lr_scheduler.load_state_dict(training_state["lr_scheduler"])
         if scaler is not None and training_state.get("amp_scaler"):
             scaler.load_state_dict(training_state["amp_scaler"])
+
+        ema_path = save_directory / EMA_DIR_NAME
+        if (ema is not None or use_ema) and ema_path.is_dir():
+            ema_model = getattr(wrapper, "model", wrapper)
+            loaded_ema = EMA.from_pretrained(
+                ema_path,
+                model_cls=type(ema_model),
+            )
+            if ema is not None:
+                ema.load_state_dict(loaded_ema.state_dict())
+            if use_ema:
+                loaded_ema.copy_to(ema_model.parameters())
 
         return wrapper, int(training_state.get("epoch", 0)), training_state
 
@@ -562,6 +581,7 @@ class PixelDiT2DWrapper(nn.Module):
             scaler=None,
             args=None,
             epoch=None,
+            ema=None,
             **kwargs,
     ):
         save_directory = Path(save_directory)
@@ -578,6 +598,8 @@ class PixelDiT2DWrapper(nn.Module):
             training_state["amp_scaler"] = scaler.state_dict()
         if args is not None:
             training_state["args"] = vars(args)
+        if ema is not None:
+            ema.save_pretrained(save_directory / EMA_DIR_NAME)
         if training_state:
             torch.save(training_state, save_directory / TRAINING_STATE_NAME)
 
@@ -590,6 +612,8 @@ class PixelDiT2DWrapper(nn.Module):
             scaler=None,
             device=None,
             return_training_state=False,
+            ema=None,
+            use_ema=False,
             **kwargs,
     ):
         save_directory = Path(save_directory)
@@ -629,6 +653,18 @@ class PixelDiT2DWrapper(nn.Module):
             lr_scheduler.load_state_dict(training_state["lr_scheduler"])
         if scaler is not None and training_state.get("amp_scaler"):
             scaler.load_state_dict(training_state["amp_scaler"])
+
+        ema_path = save_directory / EMA_DIR_NAME
+        if (ema is not None or use_ema) and ema_path.is_dir():
+            ema_model = getattr(wrapper, "model", wrapper)
+            loaded_ema = EMA.from_pretrained(
+                ema_path,
+                model_cls=type(ema_model),
+            )
+            if ema is not None:
+                ema.load_state_dict(loaded_ema.state_dict())
+            if use_ema:
+                loaded_ema.copy_to(ema_model.parameters())
 
         return wrapper, int(training_state.get("epoch", 0)), training_state
 

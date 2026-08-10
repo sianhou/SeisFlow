@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 import torch
+from diffusers.training_utils import EMAModel as EMA
 
 from core.logging.logger import build_dist_logger
 from training import distributed_mode
@@ -25,6 +26,7 @@ class DistributedTrainer(ABC):
         self.optimizer = None
         self.lr_scheduler = None
         self.scaler = None
+        self.ema = None
         self.start_epoch = 0
         self.checkpoint_dir = None
 
@@ -96,6 +98,16 @@ class DistributedTrainer(ABC):
             )
             self.model_without_ddp = self.model.module
 
+        if getattr(self.args, "use_ema", False):
+            ema_model = getattr(self.model_without_ddp, "model", self.model_without_ddp)
+            self.ema = EMA(
+                ema_model.parameters(),
+                decay=self.args.ema_decay,
+                update_after_step=self.args.ema_warmup,
+                model_cls=type(ema_model),
+                model_config=ema_model.config,
+            )
+
     def setup_optimizer(self):
         self.optimizer = torch.optim.AdamW(
             self.model_without_ddp.parameters(),
@@ -141,6 +153,7 @@ class DistributedTrainer(ABC):
             scaler=self.scaler,
             device=self.device,
             return_training_state=True,
+            ema=self.ema,
         )
         self.load_model_state(loaded_model)
         self.start_epoch = int(checkpoint_epoch)
@@ -156,6 +169,11 @@ class DistributedTrainer(ABC):
             self.model_without_ddp.model.load_state_dict(loaded_model.model.state_dict())
             return
         self.model_without_ddp.load_state_dict(loaded_model.state_dict())
+
+    def update_ema(self):
+        if self.ema is not None:
+            ema_model = getattr(self.model_without_ddp, "model", self.model_without_ddp)
+            self.ema.step(ema_model.parameters())
 
     @abstractmethod
     def train_one_epoch(self, epoch):
@@ -173,6 +191,7 @@ class DistributedTrainer(ABC):
             scaler=self.scaler,
             args=self.args,
             epoch=epoch,
+            ema=self.ema,
         )
         self.logger.log_event("checkpoint_saved", epoch=epoch, path=str(checkpoint_path))
 

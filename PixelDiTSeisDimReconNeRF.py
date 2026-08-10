@@ -188,6 +188,8 @@ class PixelDiTSeisDimReconNeRFTrainer(DistributedTrainer):
                 parameters=self.model.parameters(),
                 update_grad=should_step,
             )
+            if should_step:
+                self.update_ema()
 
             self.logger.log_event(
                 "batch_done",
@@ -313,6 +315,7 @@ class PixelDiTSeisDimReconNeRFInference(DistributedInference):
             save_directory=self.args.ckpt,
             device=self.device,
             return_training_state=True,
+            use_ema=self.args.use_ema,
         )
         self.model.eval()
 
@@ -597,6 +600,14 @@ def build_parser():
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--pin_memory", action="store_true")
     parser.add_argument("--save_every_epochs", default=50, type=int)
+    parser.add_argument(
+        "--use_ema",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Maintain EMA weights and use them for inference when loading a checkpoint.",
+    )
+    parser.add_argument("--ema_decay", default=0.999, type=float)
+    parser.add_argument("--ema_warmup", default=0, type=int)
     parser.add_argument("--log_id", default=None)
     parser.add_argument("--log_console", action="store_true")
     parser.add_argument("--seed", default=0, type=int)
