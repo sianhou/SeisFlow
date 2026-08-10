@@ -6,9 +6,9 @@ HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HWGPU_SCRIPT_DIR/env.sh"
 
 SCRIPT_NAME="$(basename "$0" .sh)"
-RUN_DIR="$CODE_PATH/temp/$SCRIPT_NAME"
-DATA_DIR="$CODE_PATH/temp/shot_dataset256"
-TRAIN_ROOT="$CODE_PATH/temp/train_PixelDiTSeisDimNeRFRecon_t_i256_NerfBands6"
+RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
+DATA_DIR="$PROJ_DIR/shot_dataset256"
+TRAIN_ROOT="$PROJ_DIR/train_PixelDiTSeisDimNeRFRecon_t_i256_NerfBands6"
 
 if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
     TRAIN_RUN_DIR="$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"

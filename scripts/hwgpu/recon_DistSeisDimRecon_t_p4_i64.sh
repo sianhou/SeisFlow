@@ -5,10 +5,10 @@ set -euo pipefail
 HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HWGPU_SCRIPT_DIR/env.sh"
 
-DATA_DIR="$CODE_PATH/temp/shot_dataset64"
+DATA_DIR="$PROJ_DIR/shot_dataset64"
 SCRIPT_NAME="$(basename "$0" .sh)"
-RUN_DIR="$CODE_PATH/temp/$SCRIPT_NAME"
-TRAIN_ROOT="$CODE_PATH/temp/train_DistSeisDimRecon_t_p4_i64"
+RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
+TRAIN_ROOT="$PROJ_DIR/train_DistSeisDimRecon_t_p4_i64"
 
 if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
     TRAIN_RUN_DIR="$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"

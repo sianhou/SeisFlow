@@ -5,6 +5,8 @@ set -euo pipefail
 HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HWGPU_SCRIPT_DIR/env.sh"
 
+DATA_DIR="$PROJ_DIR/shot_dataset64"
+
 # CONFIG NODES
 
 # Nodes configuration - ensure master is NOT in this list
@@ -12,7 +14,7 @@ NODES_LIST="clsgpu11,clsgpu12"
 NUM_WORKERS=$(echo "$NODES_LIST" | awk -F',' '{print NF}')
 NUM_NODES=$((NUM_WORKERS + 1))
 SCRIPT_NAME="$(basename "$0" .sh)"
-RUN_DIR="$CODE_PATH/temp/$SCRIPT_NAME"
+RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
 LOG_DIR="$RUN_DIR"
 TRAIN_JOB="DistSeisDimReconNeRF.py train \
 --input_dir $DATA_DIR/train/ \

@@ -5,13 +5,13 @@ set -euo pipefail
 HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HWGPU_SCRIPT_DIR/env.sh"
 
-SEGY="${SEGY:-${CODE_PATH}/temp/ma2+GathAP_header_edited.sgy}"
+SEGY="${SEGY:-$PROJ_DIR/ma2+GathAP_header_edited.sgy}"
 
 [[ -x "${PYTHON_BIN}" ]] || { echo "Python not found: ${PYTHON_BIN}" >&2; exit 1; }
 [[ -f "${SEGY}" ]] || { echo "SEG-Y file not found: ${SEGY}" >&2; exit 1; }
 
 for patch_size in 64 128 256; do
-    output_dir="${CODE_PATH}/temp/shot_dataset${patch_size}"
+    output_dir="$PROJ_DIR/shot_dataset${patch_size}"
 
     "${PYTHON_BIN}" "${CODE_PATH}/build_shot_dataset2.py" \
         --segy "${SEGY}" \
