@@ -61,13 +61,13 @@ for epoch in $(seq 100 100 1000); do
         --log_console
 
     echo "Reconstructing shots for epoch $epoch"
-    "$PYTHON_BIN" "$CODE_PATH/recon_shot_dataset2.py" \
+    "$PYTHON_BIN" "$CODE_PATH/ReconShotDataset2.py" \
         --input_dir "$patch_output_dir" \
         --input_aux_dir "$DATA_DIR/valid_aux" \
         --output_dir "$shot_output_dir"
 
     echo "Generating shot differences for epoch $epoch"
-    "$PYTHON_BIN" "$CODE_PATH/diff_shot.py" \
+    "$PYTHON_BIN" "$CODE_PATH/DiffShot.py" \
         --input1_dir "$DATA_DIR/shot" \
         --input2_dir "$shot_output_dir" \
         --output_dir "$diff_output_dir"

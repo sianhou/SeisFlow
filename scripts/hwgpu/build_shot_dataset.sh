@@ -13,7 +13,7 @@ SEGY="${SEGY:-$PROJ_DIR/ma2+GathAP_header_edited.sgy}"
 for patch_size in 64 128 256; do
     output_dir="$PROJ_DIR/shot_dataset${patch_size}"
 
-    "${PYTHON_BIN}" "${CODE_PATH}/build_shot_dataset2.py" \
+    "${PYTHON_BIN}" "${CODE_PATH}/BuildShotDataset2.py" \
         --segy "${SEGY}" \
         --patch_size "${patch_size}" \
         --overlap_size 32 \
@@ -24,7 +24,7 @@ for patch_size in 64 128 256; do
         --slice 0 1501 \
         --normalize
 
-    "${PYTHON_BIN}" "${CODE_PATH}/extract_shot2.py" \
+    "${PYTHON_BIN}" "${CODE_PATH}/ExtractShot2.py" \
         --segy "${SEGY}" \
         --output_dir "${output_dir}/shot" \
         --clip -2 2 \
