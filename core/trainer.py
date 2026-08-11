@@ -348,38 +348,64 @@ class Trainer(Dist, ABC):
                 update_grad=should_step,
             )
 
-            if should_step:
+            optimizer_step_was_skipped = bool(
+                should_step
+                and getattr(
+                    self.scaler,
+                    "optimizer_step_was_skipped",
+                    False,
+                )
+            )
+            optimizer_step_succeeded = (
+                should_step and not optimizer_step_was_skipped
+            )
+
+            if optimizer_step_succeeded:
                 self.update_ema()
 
             epoch_loss += float(total_loss_value.cpu())
 
             if self.logger is not None:
-                self.logger.log_event(
-                    "batch_done",
-                    epoch=epoch + 1,
-                    step=step + 1,
-                    steps=total_steps,
-                    total_loss=float(total_loss_value.cpu()),
-                    loss=float(loss_value.cpu()),
-                    auxiliary_loss=float(auxiliary_loss_value.cpu()),
-                    lr=self.optimizer.param_groups[0]["lr"],
-                    optimizer_step=bool(should_step),
-                    grad_norm=(
-                        ""
-                        if grad_norm is None
-                        else float(grad_norm.detach().cpu())
-                    ),
-                    time_sec=time.time() - step_start_time,
+                log_values = {
+                    "epoch": epoch + 1,
+                    "step": step + 1,
+                    "steps": total_steps,
+                    "total_loss": float(total_loss_value.cpu()),
+                    "loss": float(loss_value.cpu()),
+                    "auxiliary_loss": float(auxiliary_loss_value.cpu()),
+                }
+                log_values.update(
+                    {
+                        "lr": self.optimizer.param_groups[0]["lr"],
+                        "optimizer_step": bool(optimizer_step_succeeded),
+                        "optimizer_step_skipped": optimizer_step_was_skipped,
+                        "grad_norm": (
+                            ""
+                            if grad_norm is None
+                            else float(grad_norm.detach().cpu())
+                        ),
+                        "time_sec": time.time() - step_start_time,
+                    }
                 )
+                self.logger.log_event("batch_done", **log_values)
 
         return epoch_loss / max(total_steps, 1)
 
     def train(self):
         self.checkpoint_dir = self.logger.run_dir
+        last_completed_epoch = None
 
         for epoch in range(self.start_epoch, self.args.num_epochs):
+            sampler = getattr(self.dataloader, "sampler", None)
+            if (
+                getattr(self.args, "distributed", False)
+                and hasattr(sampler, "set_epoch")
+            ):
+                sampler.set_epoch(epoch)
+
             loss = self.train_one_epoch(epoch)
             self.lr_scheduler.step()
+            last_completed_epoch = epoch + 1
 
             if self.logger is not None:
                 self.logger.log_event(
@@ -390,6 +416,12 @@ class Trainer(Dist, ABC):
 
             if (epoch + 1) % self.args.save_every_epochs == 0:
                 self.save_pretrained(epoch + 1)
+
+        if (
+            last_completed_epoch is not None
+            and last_completed_epoch % self.args.save_every_epochs != 0
+        ):
+            self.save_pretrained(last_completed_epoch)
 
     def run(self):
         try:
