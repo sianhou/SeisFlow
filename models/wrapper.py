@@ -682,6 +682,7 @@ def build_pixeldit_2d_wrapper(
         num_classes=1000,
         use_pixel_abs_pos=True,
         pit_adaln_post_modulation=False,
+        upcast_attention=False,
         device=None,
 ):
     """Build a ``PixDiT`` model from a named architecture preset.
@@ -714,6 +715,7 @@ def build_pixeldit_2d_wrapper(
         num_classes=num_classes,
         use_pixel_abs_pos=use_pixel_abs_pos,
         pit_adaln_post_modulation=pit_adaln_post_modulation,
+        upcast_attention=upcast_attention,
     )
     wrapper = PixelDiT2DWrapper(model)
     if device is not None:
