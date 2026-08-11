@@ -10,7 +10,7 @@ DATA_DIR="$PROJ_DIR/shot_dataset64"
 # CONFIG NODES
 
 # Nodes configuration - ensure master is NOT in this list
-NODES_LIST="clsgpu08,clsgpu09,clsgpu10,clsgpu11,clsgpu12"
+NODES_LIST="clsgpu14,clsgpu15,clsgpu16,clsgpu17,clsgpu18"
 NUM_WORKERS=$(echo "$NODES_LIST" | awk -F',' '{print NF}')
 NUM_NODES=$((NUM_WORKERS + 1))
 SCRIPT_NAME="$(basename "$0" .sh)"
@@ -27,7 +27,7 @@ TRAIN_JOB="DiTSeisDimReconNeRF.py train \
 --save_every_epochs 100 \
 --pin_memory \
 --device cuda \
---nerf_bands 3 \
+--nerf_bands 6 \
 --log_console"
 
 echo "MASTER: $MASTER"

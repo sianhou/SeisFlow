@@ -67,7 +67,7 @@ for epoch in $(seq 100 100 1000); do
             --clip_recon -1 1 \
             --pin_memory \
             --device cuda \
-            --nerf_bands 3 \
+            --nerf_bands 0 \
             "$ema_flag" \
             --log_console
 

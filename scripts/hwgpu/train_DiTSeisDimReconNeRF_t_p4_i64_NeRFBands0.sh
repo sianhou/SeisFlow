@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ DATA_DIR="$PROJ_DIR/shot_dataset64"
 # CONFIG NODES
 
 # Nodes configuration - ensure master is NOT in this list
-NODES_LIST="clsgpu05,clsgpu06"
+NODES_LIST="clsgpu02,clsgpu03,clsgpu04,clsgpu05,clsgpu06"
 NUM_WORKERS=$(echo "$NODES_LIST" | awk -F',' '{print NF}')
 NUM_NODES=$((NUM_WORKERS + 1))
 SCRIPT_NAME="$(basename "$0" .sh)"
@@ -27,6 +27,7 @@ TRAIN_JOB="DiTSeisDimReconNeRF.py train \
 --save_every_epochs 100 \
 --pin_memory \
 --device cuda \
+--nerf_bands 0 \
 --log_console"
 
 echo "MASTER: $MASTER"
