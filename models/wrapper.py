@@ -450,6 +450,19 @@ class DiTTransformer2DWrapper(nn.Module):
         if device is not None:
             model = model.to(device)
         wrapper = cls(model)
+
+        ema_path = save_directory / EMA_DIR_NAME
+        if (ema is not None or use_ema) and ema_path.is_dir():
+            ema_model = getattr(wrapper, "model", wrapper)
+            loaded_ema = EMA.from_pretrained(
+                ema_path,
+                model_cls=type(ema_model),
+            )
+            if ema is not None:
+                ema.load_state_dict(loaded_ema.state_dict())
+            if use_ema:
+                loaded_ema.copy_to(ema_model.parameters())
+
         if not return_training_state:
             return wrapper
 
@@ -477,18 +490,6 @@ class DiTTransformer2DWrapper(nn.Module):
             lr_scheduler.load_state_dict(training_state["lr_scheduler"])
         if scaler is not None and training_state.get("amp_scaler"):
             scaler.load_state_dict(training_state["amp_scaler"])
-
-        ema_path = save_directory / EMA_DIR_NAME
-        if (ema is not None or use_ema) and ema_path.is_dir():
-            ema_model = getattr(wrapper, "model", wrapper)
-            loaded_ema = EMA.from_pretrained(
-                ema_path,
-                model_cls=type(ema_model),
-            )
-            if ema is not None:
-                ema.load_state_dict(loaded_ema.state_dict())
-            if use_ema:
-                loaded_ema.copy_to(ema_model.parameters())
 
         return wrapper, int(training_state.get("epoch", 0)), training_state
 
