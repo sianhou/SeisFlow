@@ -29,6 +29,7 @@ class AMPGradScaler:
         self.enabled = bool(enabled)
         self.device = device
         self._scaler = None
+        self.optimizer_step_was_skipped = False
         if self.enabled:
             self._scaler = torch.amp.GradScaler(device=device)
 
@@ -70,12 +71,20 @@ class AMPGradScaler:
                     self._scaler.unscale_(optimizer)
                 norm = compute_grad_norm(parameters)
             if self.enabled:
+                previous_scale = self._scaler.get_scale()
                 self._scaler.step(optimizer)
                 self._scaler.update()
+                # GradScaler lowers its scale when non-finite gradients make it
+                # skip optimizer.step(). Expose that outcome to EMA callers.
+                self.optimizer_step_was_skipped = (
+                    self._scaler.get_scale() < previous_scale
+                )
             else:
                 optimizer.step()
+                self.optimizer_step_was_skipped = False
         else:
             norm = None
+            self.optimizer_step_was_skipped = False
         return norm
 
     def state_dict(self):

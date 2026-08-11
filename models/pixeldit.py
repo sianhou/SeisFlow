@@ -190,6 +190,7 @@ class RotaryAttention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         norm_layer: nn.Module = RMSNorm,
+        upcast_attention: bool = False,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
@@ -198,6 +199,7 @@ class RotaryAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
+        self.upcast_attention = bool(upcast_attention)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
@@ -217,7 +219,28 @@ class RotaryAttention(nn.Module):
         k = k.view(B, -1, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
         v = v.view(B, -1, self.num_heads, C // self.num_heads).transpose(1, 2).contiguous()
 
-        x = scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+        if self.upcast_attention:
+            output_dtype = v.dtype
+            upcast_mask = mask
+            if upcast_mask is not None and upcast_mask.dtype != torch.bool:
+                upcast_mask = upcast_mask.float()
+            with torch.autocast(device_type=q.device.type, enabled=False):
+                x = scaled_dot_product_attention(
+                    q.float(),
+                    k.float(),
+                    v.float(),
+                    attn_mask=upcast_mask,
+                    dropout_p=0.0,
+                )
+            x = x.to(dtype=output_dtype)
+        else:
+            x = scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=mask,
+                dropout_p=0.0,
+            )
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
@@ -275,10 +298,22 @@ class PatchTokenEmbedder(nn.Module):
 
 
 class AugmentedDiTBlock(nn.Module):
-    def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation=None):
+    def __init__(
+            self,
+            hidden_size,
+            groups,
+            mlp_ratio=4.0,
+            adaLN_modulation=None,
+            upcast_attention=False,
+    ):
         super().__init__()
         self.norm1 = RMSNorm(hidden_size, eps=1e-6)
-        self.attn = RotaryAttention(hidden_size, num_heads=groups, qkv_bias=False)
+        self.attn = RotaryAttention(
+            hidden_size,
+            num_heads=groups,
+            qkv_bias=False,
+            upcast_attention=upcast_attention,
+        )
         self.norm2 = RMSNorm(hidden_size, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp = FeedForward(hidden_size, mlp_hidden_dim)
@@ -359,6 +394,7 @@ class PiTBlock(nn.Module):
             attn_num_heads: Optional[int] = None,
             rope_fn=None,
             adaln_post_modulation: bool = False,
+            upcast_attention: bool = False,
     ):
         super().__init__()
         self.pixel_dim = int(pixel_hidden_size)
@@ -373,7 +409,12 @@ class PiTBlock(nn.Module):
         self.compress_to_attn = nn.Linear(p2 * self.pixel_dim, self.attn_dim, bias=True)
         self.expand_from_attn = nn.Linear(self.attn_dim, p2 * self.pixel_dim, bias=True)
         self.norm1 = RMSNorm(self.pixel_dim, eps=1e-6)
-        self.attn = RotaryAttention(self.attn_dim, num_heads=self.num_heads, qkv_bias=False)
+        self.attn = RotaryAttention(
+            self.attn_dim,
+            num_heads=self.num_heads,
+            qkv_bias=False,
+            upcast_attention=upcast_attention,
+        )
         self.norm2 = RMSNorm(self.pixel_dim, eps=1e-6)
         self.mlp = MLP(self.pixel_dim, mlp_ratio=mlp_ratio, drop=0.0)
         self.adaln_post_modulation = bool(adaln_post_modulation)
@@ -439,6 +480,7 @@ class PixDiT(ModelMixin, ConfigMixin):
             num_classes=1000,
             use_pixel_abs_pos=True,
             pit_adaln_post_modulation=False,
+            upcast_attention=False,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -452,6 +494,7 @@ class PixDiT(ModelMixin, ConfigMixin):
         self.num_classes = int(num_classes)
         self.use_pixel_abs_pos = bool(use_pixel_abs_pos)
         self.pit_adaln_post_modulation = bool(pit_adaln_post_modulation)
+        self.upcast_attention = bool(upcast_attention)
         if self.pixel_depth <= 0:
             raise ValueError("PixDiT expects pixel_depth > 0 to preserve the dual-level pipeline")
 
@@ -463,7 +506,14 @@ class PixDiT(ModelMixin, ConfigMixin):
 
         self.final_layer = FinalLayer(self.pixel_hidden_size, self.out_channels)
         self.patch_blocks = nn.ModuleList(
-            [AugmentedDiTBlock(self.hidden_size, self.num_groups) for _ in range(self.patch_depth)]
+            [
+                AugmentedDiTBlock(
+                    self.hidden_size,
+                    self.num_groups,
+                    upcast_attention=self.upcast_attention,
+                )
+                for _ in range(self.patch_depth)
+            ]
         )
         self.pixel_blocks = nn.ModuleList(
             [
@@ -474,6 +524,7 @@ class PixDiT(ModelMixin, ConfigMixin):
                     num_heads=self.num_groups,
                     mlp_ratio=4.0,
                     adaln_post_modulation=self.pit_adaln_post_modulation,
+                    upcast_attention=self.upcast_attention,
                 )
                 for _ in range(self.pixel_depth)
             ]
@@ -560,6 +611,7 @@ if __name__ == "__main__":
         "num_classes": 10,
         "use_pixel_abs_pos": True,
         "pit_adaln_post_modulation": False,
+        "upcast_attention": False,
     }
     for key, expected_value in expected_config.items():
         actual_value = getattr(model.config, key)
