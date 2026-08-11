@@ -1,12 +1,10 @@
 """Independent base trainer for Flow Matching experiments."""
 
 import os
-import random
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -16,6 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 from core.logging.logger import build_dist_logger
 from .training.amp_scaler import AMPGradScaler
 from .training.model_utils import count_model_parameters
+from .training.seed import set_random_seed
 
 
 class Dist:
@@ -29,6 +28,8 @@ class Dist:
             self.rank = int(os.environ["RANK"])
             self.world_size = int(os.environ["WORLD_SIZE"])
             self.args.distributed = self.world_size > 1
+            self.args.rank = self.rank
+            self.args.world_size = self.world_size
 
             if torch.cuda.is_available() and self.args.device.startswith("cuda"):
                 self.args.gpu = int(os.environ.get("LOCAL_RANK", 0))
@@ -45,6 +46,8 @@ class Dist:
             )
         else:
             self.args.distributed = False
+            self.args.rank = self.rank
+            self.args.world_size = self.world_size
 
     def _barrier(self):
         if dist.is_available() and dist.is_initialized():
@@ -79,24 +82,11 @@ class Trainer(Dist, ABC):
         self.logger = build_dist_logger(self.args, log_node_info=True)
         return self.logger
 
-    def _setup_seed(self, seed: int = 0, deterministic: bool = False):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-
-        cudnn = getattr(torch.backends, "cudnn", None)
-        if cudnn is not None and cudnn.is_available():
-            cudnn.deterministic = deterministic
-            cudnn.benchmark = not deterministic
-
     def _setup_runtime(self):
         self._setup_distributed()
         self.device = torch.device(self.args.device)
         self._setup_logger()
-        self._setup_seed(self.args.seed + self.rank)
+        set_random_seed(self.args.seed + self.rank)
 
     @abstractmethod
     def setup_dataset(self):
@@ -118,7 +108,7 @@ class Trainer(Dist, ABC):
             shuffle=sampler is None,
             num_workers=self.args.num_workers,
             pin_memory=getattr(self.args, "pin_memory", False),
-            drop_last=True,
+            drop_last=False,
         )
 
     def preprocess_batch(self, batch):

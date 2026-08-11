@@ -7,16 +7,14 @@ import torch.nn.functional as F
 from torch import nn
 
 from core.dataset import PairedPatchDataset, PatchDataset
+from core.sampler import Sampler
 from core.trainer import Trainer
-from core.training import DistributedInference
-from flow_matching.solver import ODESolver
 from models.dinov2 import DINOv2
 from models.nerf import get_nerf_conditioning_channels, encode_nerf_conditioning
 from models.wrapper import (
     Pixel_DiT_2D_CONFIGS,
     PixelDiT2DWrapper,
     build_pixeldit_2d_wrapper,
-    VelocityModel,
 )
 
 
@@ -186,175 +184,41 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
         )
 
 
-class PixelDiTSeisDimReconNeRFInference(DistributedInference):
-    def build_inference_dataset(self):
+class PixelDiTSeisDimReconNeRFSampler(Sampler):
+    def setup_dataset(self):
         return PatchDataset(self.args.input_dim_dir)
 
-    def get_inference_items(self):
-        return self.dataset.patch_files
-
     def setup_model(self):
-        self.model, checkpoint_epoch, _training_state = PixelDiT2DWrapper.from_pretrained(
+        return PixelDiT2DWrapper.from_pretrained(
             save_directory=self.args.ckpt,
             device=self.device,
-            return_training_state=True,
             use_ema=self.args.use_ema,
         )
-        self.model.eval()
 
-        raw_dim_channels = int(self.dataset[0].shape[0])
-        nerf_dim_channels = get_nerf_conditioning_channels(
-            raw_dim_channels,
-            self.args,
-        )
-        self.solver = ODESolver(
-            velocity_model=VelocityModel(self.model).to(self.device)
-        )
-        self.time_grid = torch.tensor([0.0, 1.0], device=self.device)
-
-        self.logger.log_event(
-            "checkpoint_loaded",
-            path=self.args.ckpt,
-            epoch=checkpoint_epoch,
-        )
-        self.logger.log_event(
-            "model_ready",
-            dim_channels=nerf_dim_channels,
-        )
-
-    @staticmethod
-    def make_conditioning_batch(array, start, end, device):
-        batch = np.array(array[start:end], copy=True)
+    def preprocess_batch(self, batch):
+        batch = np.array(batch, copy=True)
         if batch.ndim == 3:
             batch = batch[:, np.newaxis, :, :]
-        tensor = torch.from_numpy(batch).float()
-        return tensor.to(device, non_blocking=True)
-
-    @staticmethod
-    def get_reconstruction_output_file(input_file, input_root, output_root):
-        relative_path = Path(input_file).relative_to(input_root)
-        return Path(output_root) / relative_path
-
-    @staticmethod
-    def restore_reconstruction_file_shape(reconstructed, input_array):
-        if reconstructed.shape[1] == 1 and input_array.ndim == 3:
-            return reconstructed.squeeze(1).numpy()
-        return reconstructed.numpy()
-
-    def reconstruct_dim_file(self, input_file, file_index=0, total_files=1):
-        dim_array = np.load(input_file, mmap_mode="r")
-        num_patches = int(dim_array.shape[0])
-        output_file = self.get_reconstruction_output_file(
-            input_file,
-            self.dataset.data_path,
-            self.output_dir,
+        conditioning = torch.from_numpy(batch).float()
+        conditioning = conditioning.to(self.device, non_blocking=True)
+        conditioning = encode_nerf_conditioning(conditioning, self.args)
+        noise = torch.randn(
+            (
+                conditioning.shape[0],
+                1,
+                conditioning.shape[-2],
+                conditioning.shape[-1],
+            ),
+            device=self.device,
+            dtype=conditioning.dtype,
         )
-        output_file.parent.mkdir(parents=True, exist_ok=True)
+        return noise, {"concat_conditioning": conditioning}
 
-        reconstructed_batches = []
-        file_min = None
-        file_max = None
-
-        for batch_start in range(0, num_patches, self.args.batch_size):
-            batch_end = min(batch_start + self.args.batch_size, num_patches)
-            conditioning = self.make_conditioning_batch(
-                dim_array,
-                batch_start,
-                batch_end,
-                self.device,
-            )
-            conditioning = encode_nerf_conditioning(conditioning, self.args)
-            noise = torch.randn(
-                (
-                    conditioning.shape[0],
-                    1,
-                    conditioning.shape[-2],
-                    conditioning.shape[-1],
-                ),
-                device=self.device,
-                dtype=conditioning.dtype,
-            )
-            sampled = self.solver.sample(
-                time_grid=self.time_grid,
-                x_init=noise,
-                return_intermediates=False,
-                step_size=self.args.solver_step_size,
-                cfg_scale=0.0,
-                label=None,
-                concat_conditioning={"concat_conditioning": conditioning},
-            )
-            reconstructed = sampled.detach().float().cpu()
-            if self.args.clip_recon is not None:
-                reconstructed = reconstructed.clamp(
-                    min=float(self.args.clip_recon[0]),
-                    max=float(self.args.clip_recon[1]),
-                )
-            reconstructed_batches.append(reconstructed)
-            batch_min = float(reconstructed.min())
-            batch_max = float(reconstructed.max())
-            file_min = batch_min if file_min is None else min(file_min, batch_min)
-            file_max = batch_max if file_max is None else max(file_max, batch_max)
-            self.logger.log_event(
-                "batch_done",
-                file=file_index + 1,
-                files=total_files,
-                name=Path(input_file).name,
-                batch=batch_start // self.args.batch_size + 1,
-                batch_size=batch_end - batch_start,
-            )
-
-        reconstructed_patches = torch.cat(reconstructed_batches, dim=0)
-        reconstructed_array = self.restore_reconstruction_file_shape(
-            reconstructed_patches,
-            dim_array,
-        )
-        np.save(output_file, reconstructed_array)
-
-        return {
-            "input_file": str(input_file),
-            "output_file": str(output_file),
-            "num_patches": num_patches,
-            "output_shape": list(reconstructed_array.shape),
-            "output_min": file_min,
-            "output_max": file_max,
-        }
-
-    def infer_one_epoch(self):
-        file_summaries = []
-        with torch.inference_mode():
-            for file_index, input_file in enumerate(self.rank_items):
-                file_summaries.append(
-                    self.reconstruct_dim_file(
-                        input_file=input_file,
-                        file_index=file_index,
-                        total_files=len(self.rank_items),
-                    )
-                )
-        return file_summaries
-
-    def summarize_inference(self, results):
-        total_patches = int(sum(item["num_patches"] for item in results))
-        output_min = min(
-            (item["output_min"] for item in results if item["output_min"] is not None),
-            default=None,
-        )
-        output_max = max(
-            (item["output_max"] for item in results if item["output_max"] is not None),
-            default=None,
-        )
-        self.logger.log_event(
-            "validation_summary",
-            output_dir=str(self.output_dir),
-            files=len(results),
-            patches=total_patches,
-            min="" if output_min is None else output_min,
-            max="" if output_max is None else output_max,
-        )
 
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Train or validate a distributed PixelDiT flow-matching model "
+            "Train or sample a distributed PixelDiT flow-matching model "
             "from noise to seismic patches with NeRF-encoded dimension coordinates."
         ),
         epilog=(
@@ -365,10 +229,10 @@ def build_parser():
             "--input_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_dim_recon "
             "--model_arch T --batch_size 32 --num_epochs 1000 --device cuda\n\n"
-            "  Valid:\n"
-            "  torchrun --nproc_per_node=4 PixelDiTSeisDimReconNeRF.py valid "
+            "  Sample:\n"
+            "  torchrun --nproc_per_node=4 PixelDiTSeisDimReconNeRF.py sample "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
-            "--input_dim_dir ./dataset256/valid_dim "
+            "--input_dim_dir ./dataset256/sample_dim "
             "--output_dir ./seisdimrecon_output "
             "--batch_size 32 --solver_step_size 0.05 --device cuda"
         ),
@@ -377,7 +241,7 @@ def build_parser():
     parser.add_argument(
         "mode",
         nargs="?",
-        choices=["train", "valid"],
+        choices=["train", "sample"],
         default="train",
         help="Run mode. Omit for training.",
     )
@@ -454,7 +318,7 @@ def build_parser():
         "--use_ema",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Maintain EMA weights and use them for inference when loading a checkpoint.",
+        help="Maintain EMA weights and use them for sampling when loading a checkpoint.",
     )
     parser.add_argument("--ema_decay", default=0.999, type=float)
     parser.add_argument("--ema_warmup", default=0, type=int)
@@ -471,8 +335,8 @@ def build_parser():
 
 
 def run(args):
-    if args.mode == "valid":
-        return PixelDiTSeisDimReconNeRFInference(args).run()
+    if args.mode == "sample":
+        return PixelDiTSeisDimReconNeRFSampler(args).run()
     return PixelDiTSeisDimReconNeRFTrainer(args).run()
 
 

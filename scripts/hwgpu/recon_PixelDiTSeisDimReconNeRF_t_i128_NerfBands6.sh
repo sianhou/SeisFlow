@@ -8,7 +8,8 @@ source "$HWGPU_SCRIPT_DIR/env.sh"
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
 DATA_DIR="$PROJ_DIR/shot_dataset128"
-TRAIN_ROOT="$PROJ_DIR/train_PixelDiTSeisDimNeRFRecon_t_i128_NerfBands6"
+TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
+TRAIN_ROOT="$PROJ_DIR/$TRAIN_SCRIPT_NAME"
 
 if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
     TRAIN_RUN_DIR="$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
@@ -45,7 +46,7 @@ for epoch in $(seq 100 100 1000); do
         --node_rank=0 \
         --master_addr="$MASTER_ADDR" \
         --master_port="$MASTER_PORT" \
-        PixelDiTSeisDimReconNeRF.py valid \
+        PixelDiTSeisDimReconNeRF.py sample \
         --ckpt "$checkpoint_dir" \
         --input_dim_dir "$DATA_DIR/valid_dim" \
         --output_dir "$RUN_DIR" \
