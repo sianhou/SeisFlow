@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 from core.dataset import PairedPatchDataset, PatchDataset
 from core.sampler import Sampler
@@ -30,7 +29,7 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
         super().__init__(args)
         self.dino = None
         self.repa_projection = None
-        self.repa_features = []
+        self.repa_projected_feature = None
         self.repa_clean_images = None
 
     @property
@@ -56,7 +55,6 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
         )
 
         if self.repa_enabled:
-            hidden_size = int(model.model.config.hidden_size)
             self.dino = DINOv2(
                 model_name=self.args.dino_model_name,
                 hub_dir=self.args.dino_hub_dir,
@@ -66,21 +64,11 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
                 parameter.requires_grad_(False)
 
             dino_hidden_size = int(self.dino.encoder.embed_dim)
-            self.repa_projection = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size),
-                nn.SiLU(),
-                nn.Linear(hidden_size, hidden_size),
-                nn.SiLU(),
-                nn.Linear(hidden_size, dino_hidden_size),
-            ).to(self.device)
-            # Register the projection on the wrapper so the base optimizer sees it.
-            model.repa_projection = self.repa_projection
-
-            patch_blocks = model.model.patch_blocks
-            align_index = self.args.repa_align_layer - 1
-            patch_blocks[align_index].register_forward_hook(
-                lambda module, inputs, output: self.repa_features.append(output)
+            model.configure_repa(
+                align_layer=self.args.repa_align_layer,
+                projection_dim=dino_hidden_size,
             )
+            self.repa_projection = model.repa_projection
 
         return model
 
@@ -90,20 +78,31 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
         conditioning = conditioning.to(self.device, non_blocking=True)
         conditioning = encode_nerf_conditioning(conditioning, self.args)
         self.repa_clean_images = clean_images
-        self.repa_features.clear()
+        self.repa_projected_feature = None
         return clean_images, {"concat_conditioning": conditioning}
+
+    def compute_loss(self, model_output, sample, mode="velocity"):
+        if self.repa_enabled:
+            if not isinstance(model_output, tuple) or len(model_output) != 2:
+                raise RuntimeError(
+                    "REPA-enabled PixelDiT must return "
+                    "(prediction, projected_feature)."
+                )
+            prediction, self.repa_projected_feature = model_output
+        else:
+            prediction = model_output
+            self.repa_projected_feature = None
+        return super().compute_loss(prediction, sample, mode=mode)
 
     def compute_auxiliary_loss(self):
         if not self.repa_enabled:
             return 0
-        if len(self.repa_features) != 1:
+        if self.repa_projected_feature is None:
             raise RuntimeError(
-                "REPA hook did not capture exactly one patch feature."
+                "REPA projected feature was not returned by the model."
             )
 
-        src_feature = self.repa_projection(
-            self.repa_features[0].float()
-        )
+        src_feature = self.repa_projected_feature
         dino_input = (self.repa_clean_images + 1.0) / 2.0
         dino_input = dino_input[:, 0:1].repeat(1, 3, 1, 1)
         dino_input = dino_input.clamp(0.0, 1.0)
@@ -120,7 +119,7 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
             dst_feature,
             dim=-1,
         ).mean()
-        self.repa_features.clear()
+        self.repa_projected_feature = None
         return self.args.repa_lambda * repa_loss
 
     @staticmethod

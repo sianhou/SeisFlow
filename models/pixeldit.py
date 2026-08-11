@@ -556,18 +556,34 @@ class PixDiT(ModelMixin, ConfigMixin):
             nn.init.zeros_(block.adaLN_modulation[0].weight)
             nn.init.zeros_(block.adaLN_modulation[0].bias)
 
-    def forward(self, x, t, y, s=None, mask=None):
+    def forward(
+            self,
+            x,
+            t,
+            y,
+            s=None,
+            mask=None,
+            return_patch_feature_at=None,
+    ):
         B, _, H, W = x.shape
         pos = self.fetch_pos(H // self.patch_size, W // self.patch_size, x.device)
         x_patches = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
         t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
         y_emb = self.y_embedder(y).view(B, 1, self.hidden_size)
         c = nn.functional.silu(t_emb + y_emb)
+        patch_feature = None
         if s is None:
             s = self.s_embedder(x_patches)
-            for block in self.patch_blocks:
+            for block_index, block in enumerate(self.patch_blocks):
                 s = block(s, c, pos, mask)
+                if block_index == return_patch_feature_at:
+                    patch_feature = s
             s = nn.functional.silu(t_emb + s)
+        elif return_patch_feature_at is not None:
+            raise ValueError(
+                "PixDiT cannot return an intermediate patch feature when "
+                "precomputed patch features are supplied through s."
+            )
         batch_size, length, _ = s.shape
         s_cond = s.view(batch_size * length, self.hidden_size)
         x_pixels = self.pixel_embedder(x, img_height=H, img_width=W, patch_size=self.patch_size)
@@ -579,6 +595,14 @@ class PixDiT(ModelMixin, ConfigMixin):
         x_pixels = x_pixels.view(B, length, P2, C_out).permute(0, 3, 2, 1).contiguous()
         x_pixels = x_pixels.view(B, C_out * P2, length)
         x_img = torch.nn.functional.fold(x_pixels, (H, W), kernel_size=self.patch_size, stride=self.patch_size)
+        if return_patch_feature_at is not None:
+            if patch_feature is None:
+                raise ValueError(
+                    "Requested patch feature layer is out of range: "
+                    f"index={return_patch_feature_at}, "
+                    f"patch_depth={len(self.patch_blocks)}."
+                )
+            return x_img, patch_feature
         return x_img
 
 if __name__ == "__main__":

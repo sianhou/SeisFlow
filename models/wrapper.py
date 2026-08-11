@@ -546,6 +546,34 @@ class PixelDiT2DWrapper(nn.Module):
     def __init__(self, model: PixDiT):
         super().__init__()
         self.model = model
+        self.repa_align_index = None
+        self.repa_projection = None
+
+    def configure_repa(self, align_layer, projection_dim):
+        """Enable training-only REPA output on a 1-based patch block."""
+        align_layer = int(align_layer)
+        projection_dim = int(projection_dim)
+        patch_depth = len(self.model.patch_blocks)
+        if not 1 <= align_layer <= patch_depth:
+            raise ValueError(
+                f"repa_align_layer must be in [1, {patch_depth}], "
+                f"got {align_layer}."
+            )
+        if projection_dim <= 0:
+            raise ValueError(
+                f"REPA projection_dim must be positive, got {projection_dim}."
+            )
+
+        hidden_size = int(self.model.config.hidden_size)
+        self.repa_align_index = align_layer - 1
+        model_device = next(self.model.parameters()).device
+        self.repa_projection = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, projection_dim),
+        ).to(device=model_device)
 
     def forward(self, x, timesteps, extra=None):
         if extra is None:
@@ -569,9 +597,21 @@ class PixelDiT2DWrapper(nn.Module):
             labels,
             s=extra.get("s"),
             mask=extra.get("mask"),
+            return_patch_feature_at=self.repa_align_index,
         )
 
-        return output
+        if self.repa_projection is None:
+            return output
+
+        prediction, patch_feature = output
+        with torch.autocast(
+                device_type=patch_feature.device.type,
+                enabled=False,
+        ):
+            projected_feature = self.repa_projection(
+                patch_feature.float()
+            )
+        return prediction, projected_feature
 
     def save_pretrained(
             self,
