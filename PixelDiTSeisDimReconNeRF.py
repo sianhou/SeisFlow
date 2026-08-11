@@ -1,6 +1,4 @@
 import argparse
-import gc
-import time
 from pathlib import Path
 
 import numpy as np
@@ -9,8 +7,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from core.dataset import PairedPatchDataset, PatchDataset
-from core.training import DistributedInference, DistributedTrainer
-from flow_matching.path import CondOTProbPath
+from core.trainer import Trainer
+from core.training import DistributedInference
 from flow_matching.solver import ODESolver
 from models.dinov2 import DINOv2
 from models.nerf import get_nerf_conditioning_channels, encode_nerf_conditioning
@@ -29,24 +27,25 @@ class RawDefaultsHelpFormatter(
     pass
 
 
-class PixelDiTSeisDimReconNeRFTrainer(DistributedTrainer):
+class PixelDiTSeisDimReconNeRFTrainer(Trainer):
     def __init__(self, args):
         super().__init__(args)
-        self.flow_path = CondOTProbPath()
         self.dino = None
         self.repa_projection = None
+        self.repa_features = []
+        self.repa_clean_images = None
 
     @property
     def repa_enabled(self):
         return self.args.repa_lambda > 0.0
 
-    def build_training_dataset(self):
+    def setup_dataset(self):
         return PairedPatchDataset(
             self.args.input_dir,
             self.args.input_dim_dir,
         )
 
-    def build_model(self):
+    def setup_model(self):
         raw_dim_channels = int(self.dataset.dataset1[0].shape[0])
         nerf_dim_channels = get_nerf_conditioning_channels(raw_dim_channels, self.args)
         model = build_pixeldit_2d_wrapper(
@@ -78,136 +77,52 @@ class PixelDiTSeisDimReconNeRFTrainer(DistributedTrainer):
             # Register the projection on the wrapper so the base optimizer sees it.
             model.repa_projection = self.repa_projection
 
+            patch_blocks = model.model.patch_blocks
+            align_index = self.args.repa_align_layer - 1
+            patch_blocks[align_index].register_forward_hook(
+                lambda module, inputs, output: self.repa_features.append(output)
+            )
+
         return model
 
-    def validate_batch(self, clean_images, conditioning):
-        if clean_images.shape[1] != 1:
-            raise ValueError(
-                "PixelDiTSeisDimReconNeRF expects single-channel image patches, "
-                f"got shape {tuple(clean_images.shape)}."
+    def preprocess_batch(self, batch):
+        clean_images, conditioning = batch
+        clean_images = clean_images.to(self.device, non_blocking=True)
+        conditioning = conditioning.to(self.device, non_blocking=True)
+        conditioning = encode_nerf_conditioning(conditioning, self.args)
+        self.repa_clean_images = clean_images
+        self.repa_features.clear()
+        return clean_images, {"concat_conditioning": conditioning}
+
+    def compute_auxiliary_loss(self):
+        if not self.repa_enabled:
+            return 0
+        if len(self.repa_features) != 1:
+            raise RuntimeError(
+                "REPA hook did not capture exactly one patch feature."
             )
 
-    def train_one_epoch(self, epoch):
-        gc.collect()
-        self.model.train(True)
-        if self.repa_enabled:
-            self.repa_projection.train(True)
+        src_feature = self.repa_projection(
+            self.repa_features[0].float()
+        )
+        dino_input = (self.repa_clean_images + 1.0) / 2.0
+        dino_input = dino_input[:, 0:1].repeat(1, 3, 1, 1)
+        dino_input = dino_input.clamp(0.0, 1.0)
 
-        running_loss = 0.0
-        running_steps = 0
-        epoch_loss = 0.0
-        epoch_steps = 0
-        total_steps = len(self.dataloader)
-        accum_steps = 0
+        with torch.inference_mode():
+            dst_feature = self.dino(dino_input).float()
 
-        for step, batch in enumerate(self.dataloader):
-            if step % self.args.grad_accum_steps == 0:
-                self.optimizer.zero_grad()
-                running_loss = 0.0
-                running_steps = 0
-                accum_steps = min(self.args.grad_accum_steps, total_steps - step)
-
-            clean_images, conditioning = batch
-            clean_images = clean_images.to(self.device, non_blocking=True)
-            conditioning = conditioning.to(self.device, non_blocking=True)
-            self.validate_batch(clean_images, conditioning)
-            conditioning = encode_nerf_conditioning(conditioning, self.args)
-
-            noise = torch.randn_like(clean_images)
-            timesteps = torch.rand(clean_images.shape[0], device=self.device)
-            flow_sample = self.flow_path.sample(t=timesteps, x_0=noise, x_1=clean_images)
-            noisy_images = flow_sample.x_t
-            target_velocity = flow_sample.dx_t
-
-            repa_loss = torch.zeros((), device=self.device)
-            feature_buffer = []
-            hook_handle = None
-            if self.repa_enabled:
-                patch_blocks = self.model_without_ddp.model.patch_blocks
-                align_index = self.args.repa_align_layer - 1
-                hook_handle = patch_blocks[align_index].register_forward_hook(
-                    lambda module, inputs, output: feature_buffer.append(output)
-                )
-
-            with torch.amp.autocast(
-                    device_type=self.device.type,
-                    enabled=self.device.type == "cuda",
-            ):
-                predicted_velocity = self.model(
-                    noisy_images,
-                    timesteps,
-                    extra={"concat_conditioning": conditioning},
-                )
-                fm_loss = F.mse_loss(predicted_velocity, target_velocity)
-
-            if self.repa_enabled:
-                if len(feature_buffer) != 1:
-                    raise RuntimeError(
-                        "REPA hook did not capture exactly one patch feature."
-                    )
-                src_feature = self.repa_projection(feature_buffer[0].float())
-                dino_input = (clean_images + 1.0) / 2.0
-                dino_input = dino_input[:, 0:1].repeat(1, 3, 1, 1)
-                dino_input = dino_input.clamp(0.0, 1.0)
-                with torch.inference_mode():
-                    dst_feature = self.dino(dino_input).float()
-
-                src_feature, dst_feature = self.match_repa_tokens(
-                    src_feature,
-                    dst_feature,
-                )
-                repa_loss = 1.0 - F.cosine_similarity(
-                    src_feature,
-                    dst_feature,
-                    dim=-1,
-                ).mean()
-                loss = fm_loss + self.args.repa_lambda * repa_loss
-            else:
-                loss = fm_loss
-
-            if hook_handle is not None:
-                hook_handle.remove()
-
-            loss_value = float(loss.detach().cpu())
-            running_loss += loss_value
-            running_steps += 1
-            epoch_loss += loss_value
-            epoch_steps += 1
-
-            scaled_loss = loss / accum_steps
-            should_step = (
-                    (step + 1) % self.args.grad_accum_steps == 0
-                    or step + 1 == total_steps
-            )
-            step_start_time = time.time()
-            clip_grad = self.args.clip_grad if self.args.clip_grad > 0 else None
-            grad_norm = self.scaler(
-                scaled_loss,
-                self.optimizer,
-                clip_grad=clip_grad,
-                parameters=self.model.parameters(),
-                update_grad=should_step,
-            )
-            if should_step:
-                self.update_ema()
-
-            self.logger.log_event(
-                "batch_done",
-                epoch=epoch + 1,
-                step=step + 1,
-                steps=total_steps,
-                loss=loss_value,
-                fm_loss=float(fm_loss.detach().cpu()),
-                repa_loss=float(repa_loss.detach().cpu()),
-                repa_lambda=self.args.repa_lambda,
-                avg_loss=running_loss / max(running_steps, 1),
-                lr=self.optimizer.param_groups[0]["lr"],
-                optimizer_step=bool(should_step),
-                grad_norm="" if grad_norm is None else float(grad_norm.detach().cpu()),
-                time_sec=time.time() - step_start_time,
-            )
-
-        return epoch_loss / max(epoch_steps, 1)
+        src_feature, dst_feature = self.match_repa_tokens(
+            src_feature,
+            dst_feature,
+        )
+        repa_loss = 1.0 - F.cosine_similarity(
+            src_feature,
+            dst_feature,
+            dim=-1,
+        ).mean()
+        self.repa_features.clear()
+        return self.args.repa_lambda * repa_loss
 
     @staticmethod
     def match_repa_tokens(src_feature, dst_feature):
@@ -243,41 +158,8 @@ class PixelDiTSeisDimReconNeRFTrainer(DistributedTrainer):
         )
         return src_feature, dst_feature
 
-    def validate_train_args(self):
-        args = self.args
-        if not Path(args.input_dir).is_dir():
-            raise FileNotFoundError(f"--input_dir must be a directory, got {args.input_dir}.")
-        if not Path(args.input_dim_dir).is_dir():
-            raise FileNotFoundError(
-                f"--input_dim_dir must be a directory, got {args.input_dim_dir}."
-            )
-        if args.ckpt is not None and not Path(args.ckpt).is_dir():
-            raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-        if args.batch_size <= 0:
-            raise ValueError("--batch_size must be positive.")
-        if args.grad_accum_steps <= 0:
-            raise ValueError("--grad_accum_steps must be positive.")
-        if args.nerf_bands < 0:
-            raise ValueError("--nerf_bands must be non-negative.")
-        if args.num_epochs <= 0:
-            raise ValueError("--num_epochs must be positive.")
-        if args.learning_rate <= 0:
-            raise ValueError("--learning_rate must be positive.")
-        if args.num_workers < 0:
-            raise ValueError("--num_workers must be non-negative.")
-        if args.save_every_epochs <= 0:
-            raise ValueError("--save_every_epochs must be positive.")
-        if not 0.0 <= args.adam_beta1 < 1.0:
-            raise ValueError("--adam_beta1 must be in [0, 1).")
-        if not 0.0 <= args.adam_beta2 < 1.0:
-            raise ValueError("--adam_beta2 must be in [0, 1).")
-        if args.repa_lambda < 0.0:
-            raise ValueError("--repa_lambda must be non-negative.")
-        if args.repa_align_layer <= 0:
-            raise ValueError("--repa_align_layer must be positive.")
-
-    def load_checkpoint(self):
-        super().load_checkpoint()
+    def from_pretrained(self):
+        super().from_pretrained()
         if not self.repa_enabled or not self.args.ckpt:
             return
         projection_path = Path(self.args.ckpt) / "repa_projection.pth"
@@ -292,8 +174,8 @@ class PixelDiTSeisDimReconNeRFTrainer(DistributedTrainer):
         )
         self.repa_projection.load_state_dict(state)
 
-    def save_checkpoint(self, epoch):
-        super().save_checkpoint(epoch)
+    def save_pretrained(self, epoch):
+        super().save_pretrained(epoch)
         if not self.is_main_process or not self.repa_enabled:
             return
         checkpoint_path = Path(self.checkpoint_dir) / f"checkpoint_epoch_{epoch:05d}"
@@ -320,7 +202,10 @@ class PixelDiTSeisDimReconNeRFInference(DistributedInference):
         self.model.eval()
 
         raw_dim_channels = int(self.dataset[0].shape[0])
-        nerf_dim_channels = self.validate_model_channels(raw_dim_channels)
+        nerf_dim_channels = get_nerf_conditioning_channels(
+            raw_dim_channels,
+            self.args,
+        )
         self.solver = ODESolver(
             velocity_model=VelocityModel(self.model).to(self.device)
         )
@@ -335,24 +220,6 @@ class PixelDiTSeisDimReconNeRFInference(DistributedInference):
             "model_ready",
             dim_channels=nerf_dim_channels,
         )
-
-    def validate_model_channels(self, raw_dim_channels):
-        nerf_dim_channels = get_nerf_conditioning_channels(raw_dim_channels, self.args)
-        expected_model_in_channels = 1 + nerf_dim_channels
-        model_in_channels = int(self.model.model.config.in_channels)
-        model_out_channels = int(self.model.model.config.out_channels)
-        if model_in_channels != expected_model_in_channels:
-            raise ValueError(
-                "Checkpoint input channel count does not match image + NeRF dim data: "
-                f"model in_channels={model_in_channels}, raw_dim_channels={raw_dim_channels}, "
-                f"nerf_dim_channels={nerf_dim_channels}, expected={expected_model_in_channels}."
-            )
-        if model_out_channels != 1:
-            raise ValueError(
-                "Checkpoint output channel count does not match single-channel image patches: "
-                f"model out_channels={model_out_channels}."
-            )
-        return nerf_dim_channels
 
     @staticmethod
     def make_conditioning_batch(array, start, end, device):
@@ -482,28 +349,6 @@ class PixelDiTSeisDimReconNeRFInference(DistributedInference):
             min="" if output_min is None else output_min,
             max="" if output_max is None else output_max,
         )
-
-    def validate_args(self):
-        args = self.args
-        if args.ckpt is None:
-            raise ValueError("--ckpt is required in valid mode.")
-        if not Path(args.ckpt).is_dir():
-            raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-        if not Path(args.input_dim_dir).is_dir():
-            raise FileNotFoundError(
-                f"--input_dim_dir must be a directory, got {args.input_dim_dir}."
-            )
-        if args.batch_size <= 0:
-            raise ValueError("--batch_size must be positive.")
-        if args.nerf_bands < 0:
-            raise ValueError("--nerf_bands must be non-negative.")
-        if args.num_workers < 0:
-            raise ValueError("--num_workers must be non-negative.")
-        if args.solver_step_size <= 0:
-            raise ValueError("--solver_step_size must be positive.")
-        if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
-            raise ValueError("--clip_recon MIN must be smaller than MAX.")
-
 
 def build_parser():
     parser = argparse.ArgumentParser(
