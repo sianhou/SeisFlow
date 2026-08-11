@@ -306,6 +306,9 @@ class Trainer(Dist, ABC):
             if step % accum_steps == 0:
                 self.optimizer.zero_grad(set_to_none=True)
 
+            group_start = (step // accum_steps) * accum_steps
+            group_size = min(accum_steps, total_steps - group_start)
+
             x, extra = self.preprocess_batch(batch)
             sample = self.sample_path(x)
 
@@ -334,7 +337,7 @@ class Trainer(Dist, ABC):
                 auxiliary_loss,
                 device=total_loss.device,
             ).detach()
-            total_loss = total_loss / min(accum_steps, total_steps - step)
+            total_loss = total_loss / group_size
             clip_grad = getattr(self.args, "clip_grad", 0.0)
 
             grad_norm = self.scaler(
