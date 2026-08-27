@@ -26,7 +26,7 @@ class RawDefaultsHelpFormatter(
     pass
 
 
-class DiTSeisDimReconTrainer(DistributedTrainer):
+class DiTSeisDimReconExternalNoiseTrainer(DistributedTrainer):
     def __init__(self, args):
         super().__init__(args)
         self.flow_path = CondOTProbPath()
@@ -49,23 +49,6 @@ class DiTSeisDimReconTrainer(DistributedTrainer):
             device=self.device,
         )
 
-    def validate_batch(self, clean_images, conditioning):
-        if clean_images.shape[1] != 1:
-            raise ValueError(
-                "DiTSeisDimRecon expects single-channel image patches, "
-                f"got shape {tuple(clean_images.shape)}."
-            )
-        if clean_images.shape[-2:] != (self.args.input_size, self.args.input_size):
-            raise ValueError(
-                f"Expected {self.args.input_size}x{self.args.input_size} image patches, "
-                f"got shape {tuple(clean_images.shape)}."
-            )
-        if conditioning.shape[-2:] != (self.args.input_size, self.args.input_size):
-            raise ValueError(
-                f"Expected {self.args.input_size}x{self.args.input_size} dimension patches, "
-                f"got shape {tuple(conditioning.shape)}."
-            )
-
     def train_one_epoch(self, epoch):
         gc.collect()
         self.model.train(True)
@@ -87,7 +70,6 @@ class DiTSeisDimReconTrainer(DistributedTrainer):
             clean_images, conditioning = batch
             clean_images = clean_images.to(self.device, non_blocking=True)
             conditioning = conditioning.to(self.device, non_blocking=True)
-            self.validate_batch(clean_images, conditioning)
 
             noise = torch.randn_like(clean_images)
             timesteps = torch.rand(clean_images.shape[0], device=self.device)
@@ -141,9 +123,6 @@ class DiTSeisDimReconTrainer(DistributedTrainer):
 
         return epoch_loss / max(epoch_steps, 1)
 
-    def validate_train_args(self):
-        validate_train_args(self.args)
-
 
 class DimVelocityModel(ModelWrapper):
     def __init__(self, model):
@@ -170,8 +149,11 @@ class DimVelocityModel(ModelWrapper):
         return result.to(dtype=torch.float32)
 
 
-class DiTSeisDimReconInference(DistributedInference):
+class DiTSeisDimReconExternalNoiseInference(DistributedInference):
     def build_inference_dataset(self):
+        self.noise_data_path = (
+            None if self.args.noise_data_dir is None else Path(self.args.noise_data_dir)
+        )
         return PatchDataset(self.args.train_data_dim_dir)
 
     def get_inference_items(self):
@@ -187,7 +169,6 @@ class DiTSeisDimReconInference(DistributedInference):
         self.model.eval()
 
         dim_channels = int(self.dataset[0].shape[0])
-        self.validate_model_channels(dim_channels)
         self.solver = ODESolver(velocity_model=DimVelocityModel(self.model).to(self.device))
         self.time_grid = torch.tensor([0.0, 1.0], device=self.device)
 
@@ -201,24 +182,8 @@ class DiTSeisDimReconInference(DistributedInference):
             dim_channels=dim_channels,
         )
 
-    def validate_model_channels(self, dim_channels):
-        expected_model_in_channels = 1 + dim_channels
-        model_in_channels = int(self.model.model.config.in_channels)
-        model_out_channels = int(self.model.model.config.out_channels)
-        if model_in_channels != expected_model_in_channels:
-            raise ValueError(
-                "Checkpoint input channel count does not match image + dim data: "
-                f"model in_channels={model_in_channels}, dim_channels={dim_channels}, "
-                f"expected={expected_model_in_channels}."
-            )
-        if model_out_channels != 1:
-            raise ValueError(
-                "Checkpoint output channel count does not match single-channel image patches: "
-                f"model out_channels={model_out_channels}."
-            )
-
     @staticmethod
-    def make_conditioning_batch(array, start, end, device):
+    def make_batch(array, start, end, device):
         batch = np.array(array[start:end], copy=True)
         if batch.ndim == 3:
             batch = batch[:, np.newaxis, :, :]
@@ -239,6 +204,10 @@ class DiTSeisDimReconInference(DistributedInference):
     def reconstruct_dim_file(self, input_file, file_index=0, total_files=1):
         dim_array = np.load(input_file, mmap_mode="r")
         num_patches = int(dim_array.shape[0])
+        noise_array = None
+        if self.noise_data_path is not None:
+            noise_file = self.noise_data_path / Path(input_file).name
+            noise_array = np.load(noise_file, mmap_mode="r")
         output_file = self.get_reconstruction_output_file(
             input_file,
             self.dataset.data_path,
@@ -252,22 +221,30 @@ class DiTSeisDimReconInference(DistributedInference):
 
         for batch_start in range(0, num_patches, self.args.batch_size):
             batch_end = min(batch_start + self.args.batch_size, num_patches)
-            conditioning = self.make_conditioning_batch(
+            conditioning = self.make_batch(
                 dim_array,
                 batch_start,
                 batch_end,
                 self.device,
             )
-            noise = torch.randn(
-                (
-                    conditioning.shape[0],
-                    1,
-                    conditioning.shape[-2],
-                    conditioning.shape[-1],
-                ),
-                device=self.device,
-                dtype=conditioning.dtype,
-            )
+            if noise_array is None:
+                noise = torch.randn(
+                    (
+                        conditioning.shape[0],
+                        1,
+                        conditioning.shape[-2],
+                        conditioning.shape[-1],
+                    ),
+                    device=self.device,
+                    dtype=conditioning.dtype,
+                )
+            else:
+                noise = self.make_batch(
+                    noise_array,
+                    batch_start,
+                    batch_end,
+                    self.device,
+                )
             sampled = self.solver.sample(
                 time_grid=self.time_grid,
                 x_init=noise,
@@ -339,80 +316,33 @@ class DiTSeisDimReconInference(DistributedInference):
         self.logger.log_event(
             "validation_summary",
             output_dir=str(self.output_dir),
+            noise_source=(
+                "external" if self.noise_data_path is not None else "random"
+            ),
             files=len(results),
             patches=total_patches,
             min="" if output_min is None else output_min,
             max="" if output_max is None else output_max,
         )
 
-    def validate_args(self):
-        validate_valid_args(self.args)
-
-
-def validate_train_args(args):
-    if not Path(args.train_data_dir).is_dir():
-        raise FileNotFoundError(f"--train_data_dir must be a directory, got {args.train_data_dir}.")
-    if not Path(args.train_data_dim_dir).is_dir():
-        raise FileNotFoundError(
-            f"--train_data_dim_dir must be a directory, got {args.train_data_dim_dir}."
-        )
-    if args.ckpt is not None and not Path(args.ckpt).is_dir():
-        raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-    if args.input_size <= 0:
-        raise ValueError("--input_size must be positive.")
-    if args.batch_size <= 0:
-        raise ValueError("--batch_size must be positive.")
-    if args.grad_accum_steps <= 0:
-        raise ValueError("--grad_accum_steps must be positive.")
-    if args.num_epochs <= 0:
-        raise ValueError("--num_epochs must be positive.")
-    if args.learning_rate <= 0:
-        raise ValueError("--learning_rate must be positive.")
-    if args.num_workers < 0:
-        raise ValueError("--num_workers must be non-negative.")
-    if args.save_every_epochs <= 0:
-        raise ValueError("--save_every_epochs must be positive.")
-    if not 0.0 <= args.adam_beta1 < 1.0:
-        raise ValueError("--adam_beta1 must be in [0, 1).")
-    if not 0.0 <= args.adam_beta2 < 1.0:
-        raise ValueError("--adam_beta2 must be in [0, 1).")
-
-
-def validate_valid_args(args):
-    if args.ckpt is None:
-        raise ValueError("--ckpt is required in valid mode.")
-    if not Path(args.ckpt).is_dir():
-        raise FileNotFoundError(f"--ckpt must be a checkpoint directory, got {args.ckpt}.")
-    if not Path(args.train_data_dim_dir).is_dir():
-        raise FileNotFoundError(
-            f"--train_data_dim_dir must be a directory, got {args.train_data_dim_dir}."
-        )
-    if args.batch_size <= 0:
-        raise ValueError("--batch_size must be positive.")
-    if args.num_workers < 0:
-        raise ValueError("--num_workers must be non-negative.")
-    if args.solver_step_size <= 0:
-        raise ValueError("--solver_step_size must be positive.")
-    if args.clip_recon is not None and args.clip_recon[0] >= args.clip_recon[1]:
-        raise ValueError("--clip_recon MIN must be smaller than MAX.")
-
 
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Train or validate DiTSeisDimRecon, a distributed conditional flow-matching model "
+            "Train or validate DiTSeisDimReconExternalNoise, a distributed conditional "
+            "flow-matching model "
             "from noise to seismic patches with dimension coordinates."
         ),
         epilog=(
             "Examples:\n"
             "  Train:\n"
-            "  torchrun --nproc_per_node=4 DiTSeisDimRecon.py "
+            "  torchrun --nproc_per_node=4 DiTSeisDimReconExternalNoise.py "
             "--train_data_dir ./dataset256/train "
             "--train_data_dim_dir ./dataset256/train_dim "
             "--output_dir ./output_dim_recon "
             "--model_arch DiT_T_4 --input_size 256 --batch_size 32 --num_epochs 1000 --device cuda\n\n"
             "  Valid:\n"
-            "  torchrun --nproc_per_node=4 DiTSeisDimRecon.py valid "
+            "  torchrun --nproc_per_node=4 DiTSeisDimReconExternalNoise.py valid "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
             "--train_data_dim_dir ./dataset256/valid_dim "
             "--output_dir ./seisdimrecon_output "
@@ -429,6 +359,15 @@ def build_parser():
     )
     parser.add_argument("--train_data_dir", default="./dataset/train")
     parser.add_argument("--train_data_dim_dir", default="./dataset/train_dim")
+    parser.add_argument(
+        "--noise_data_dir",
+        default=None,
+        help=(
+            "Optional directory of external single-channel noise patch NPY files "
+            "for valid mode, matched to dimension patches by file name. "
+            "When omitted, noise is generated with torch.randn."
+        ),
+    )
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument(
         "--model_arch",
@@ -475,13 +414,13 @@ def build_parser():
 
 def run_train(args):
     args.mode = "train"
-    trainer = DiTSeisDimReconTrainer(args)
+    trainer = DiTSeisDimReconExternalNoiseTrainer(args)
     return trainer.run()
 
 
 def run_valid(args):
     args.mode = "valid"
-    inference = DiTSeisDimReconInference(args)
+    inference = DiTSeisDimReconExternalNoiseInference(args)
     return inference.run()
 
 
