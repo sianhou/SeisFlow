@@ -1,6 +1,6 @@
 ---
 name: research-direction-board
-description: 创建或同步 SeisFlow 的 directions_board.md 研究方向看板时使用，将每个方向按重要、保留、暂停分组，并确保看板名称与对应方向文档名称完全一致。
+description: 创建或同步 SeisFlow 的 directions_board.md 研究方向看板时使用，将每个方向按下一步重点、重要、保留、暂停分组，并确保看板名称与对应方向文档名称完全一致。
 ---
 
 # 研究方向看板规范
@@ -13,6 +13,14 @@ description: 创建或同步 SeisFlow 的 directions_board.md 研究方向看板
 
 ```markdown
 # 研究方向看板
+
+## 下一步重点
+
+### [方向名称](directions_name.md)
+
+- 当前判断：
+- 下一步计划：
+- 最后更新：YYYY-MM-DD
 
 ## 重要
 
@@ -41,6 +49,13 @@ description: 创建或同步 SeisFlow 的 directions_board.md 研究方向看板
 ```
 
 没有方向的分组可以保留标题，不添加空白卡片。
+
+四个分组的含义：
+
+- **下一步重点**：接下来立即优先推进的核心研究方向。
+- **重要**：对整体研究有重要影响，但不是下一步最高优先级。
+- **保留**：有效果或有价值，但不是关键问题，暂不优先推进。
+- **暂停**：当前效果不好或不值得继续，仅在满足条件后重新考虑。
 
 ## 对应规则
 
