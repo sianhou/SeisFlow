@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 set -euo pipefail
 
@@ -10,20 +10,21 @@ DATA_DIR="$PROJ_DIR/shot_dataset64"
 # CONFIG NODES
 
 # Nodes configuration - ensure master is NOT in this list
-NODES_LIST="clsgpu02,clsgpu03,clsgpu04,clsgpu05,clsgpu06"
+NODES_LIST="clsgpu08,clsgpu09,clsgpu10,clsgpu11,clsgpu12"
 NUM_WORKERS=$(echo "$NODES_LIST" | awk -F',' '{print NF}')
 NUM_NODES=$((NUM_WORKERS + 1))
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
 LOG_DIR="$RUN_DIR"
-TRAIN_JOB="DiTSeisDimReconNeRF.py train \
+TRAIN_JOB="AugmentedDiTSeisDimReconNeRF.py train \
 --input_dir $DATA_DIR/train/ \
 --input_dim_dir $DATA_DIR/train_dim/ \
 --output_dir $RUN_DIR/ \
---model_arch DiT_T_4 \
---input_size 64 \
---batch_size 32 \
+--model_arch T \
+--patch_size 4 \
 --upcast_attention \
+--max_period 10000 \
+--batch_size 32 \
 --num_epochs 2000 \
 --save_every_epochs 100 \
 --pin_memory \

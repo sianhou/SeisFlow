@@ -66,7 +66,7 @@ def apply_adaln(x, shift, scale):
 
 
 class TimestepConditioner(nn.Module):
-    def __init__(self, hidden_size, frequency_embedding_size=256):
+    def __init__(self, hidden_size, frequency_embedding_size=256, max_period=10):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
@@ -74,6 +74,9 @@ class TimestepConditioner(nn.Module):
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
+        self.max_period = float(max_period)
+        if self.max_period <= 0:
+            raise ValueError(f"max_period must be positive, got {max_period}.")
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=10):
@@ -88,7 +91,11 @@ class TimestepConditioner(nn.Module):
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_freq = self.timestep_embedding(
+            t,
+            self.frequency_embedding_size,
+            max_period=self.max_period,
+        )
         mlp_dtype = next(self.mlp.parameters()).dtype
         if t_freq.dtype != mlp_dtype:
             t_freq = t_freq.to(mlp_dtype)
@@ -277,6 +284,28 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
+
+class AugmentedDiTFinalLayer(nn.Module):
+    """Conditioned patch-output head for a standalone augmented DiT."""
+
+    def __init__(self, hidden_size, patch_size, out_channels):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, eps=1e-6)
+        self.adaLN_modulation = nn.Sequential(
+            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
+        )
+        self.linear = nn.Linear(
+            hidden_size,
+            patch_size * patch_size * out_channels,
+            bias=True,
+        )
+
+    def forward(self, x, c):
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
+        x = apply_adaln(self.norm(x), shift, scale)
+        return self.linear(x)
+
+
 class PatchTokenEmbedder(nn.Module):
     def __init__(
             self,
@@ -326,6 +355,167 @@ class AugmentedDiTBlock(nn.Module):
         x = x + gate_msa * self.attn(apply_adaln(self.norm1(x), shift_msa, scale_msa), pos, mask=mask)
         x = x + gate_mlp * self.mlp(apply_adaln(self.norm2(x), shift_mlp, scale_mlp))
         return x
+
+
+class AugmentedDiT2DModel(ModelMixin, ConfigMixin):
+    """Patch-level DiT composed exclusively of :class:`AugmentedDiTBlock`.
+
+    Unlike :class:`PixDiT`, this model predicts image patches directly and has
+    no pixel-level ``PiTBlock`` branch.
+    """
+
+    @register_to_config
+    def __init__(
+            self,
+            in_channels=4,
+            out_channels=None,
+            num_groups=12,
+            hidden_size=768,
+            depth=12,
+            patch_size=2,
+            num_classes=1000,
+            max_period=10,
+            upcast_attention=False,
+    ):
+        super().__init__()
+        self.in_channels = int(in_channels)
+        self.out_channels = self.in_channels if out_channels is None else int(out_channels)
+        self.num_groups = int(num_groups)
+        self.hidden_size = int(hidden_size)
+        self.depth = int(depth)
+        self.patch_size = int(patch_size)
+        self.num_classes = int(num_classes)
+        self.max_period = float(max_period)
+        self.upcast_attention = bool(upcast_attention)
+
+        if self.depth <= 0:
+            raise ValueError(f"depth must be positive, got {depth}.")
+        if self.patch_size <= 0:
+            raise ValueError(f"patch_size must be positive, got {patch_size}.")
+        if self.hidden_size % self.num_groups != 0:
+            raise ValueError("hidden_size must be divisible by num_groups.")
+        head_dim = self.hidden_size // self.num_groups
+        if head_dim % 4 != 0:
+            raise ValueError(
+                "2D rotary embeddings require hidden_size / num_groups "
+                f"to be divisible by 4, got head_dim={head_dim}."
+            )
+        if self.max_period <= 0:
+            raise ValueError(f"max_period must be positive, got {max_period}.")
+
+        patch_channels = self.in_channels * self.patch_size ** 2
+        self.patch_embedder = PatchTokenEmbedder(
+            patch_channels,
+            self.hidden_size,
+            bias=True,
+        )
+        self.t_embedder = TimestepConditioner(
+            self.hidden_size,
+            max_period=self.max_period,
+        )
+        self.y_embedder = ClassEmbedder(self.num_classes + 1, self.hidden_size)
+        self.patch_blocks = nn.ModuleList(
+            [
+                AugmentedDiTBlock(
+                    self.hidden_size,
+                    self.num_groups,
+                    upcast_attention=self.upcast_attention,
+                )
+                for _ in range(self.depth)
+            ]
+        )
+        self.final_layer = AugmentedDiTFinalLayer(
+            self.hidden_size,
+            self.patch_size,
+            self.out_channels,
+        )
+        self.precompute_pos = dict()
+        self.initialize_weights()
+
+    def fetch_pos(self, height, width, device):
+        key = (height, width)
+        if key not in self.precompute_pos:
+            self.precompute_pos[key] = precompute_freqs_cis_2d(
+                self.hidden_size // self.num_groups,
+                height,
+                width,
+            )
+        return self.precompute_pos[key].to(device)
+
+    def initialize_weights(self):
+        weight = self.patch_embedder.proj.weight.data
+        nn.init.xavier_uniform_(weight.view([weight.shape[0], -1]))
+        nn.init.zeros_(self.patch_embedder.proj.bias)
+        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        for block in self.patch_blocks:
+            nn.init.zeros_(block.adaLN_modulation[0].weight)
+            nn.init.zeros_(block.adaLN_modulation[0].bias)
+        nn.init.zeros_(self.final_layer.adaLN_modulation[0].weight)
+        nn.init.zeros_(self.final_layer.adaLN_modulation[0].bias)
+        nn.init.zeros_(self.final_layer.linear.weight)
+        nn.init.zeros_(self.final_layer.linear.bias)
+
+    def forward(
+            self,
+            x,
+            t,
+            y,
+            mask=None,
+            return_patch_feature_at=None,
+    ):
+        if x.dim() != 4:
+            raise ValueError("AugmentedDiT2DModel expects x with shape [B,C,H,W].")
+        batch_size, channels, height, width = x.shape
+        if channels != self.in_channels:
+            raise ValueError(
+                f"Expected {self.in_channels} input channels, got {channels}."
+            )
+        if height % self.patch_size or width % self.patch_size:
+            raise ValueError(
+                "Input height and width must be divisible by patch_size; "
+                f"got {(height, width)} and patch_size={self.patch_size}."
+            )
+
+        patch_height = height // self.patch_size
+        patch_width = width // self.patch_size
+        pos = self.fetch_pos(patch_height, patch_width, x.device)
+        tokens = torch.nn.functional.unfold(
+            x,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        ).transpose(1, 2)
+        tokens = self.patch_embedder(tokens)
+
+        t_emb = self.t_embedder(t.reshape(-1)).view(batch_size, 1, self.hidden_size)
+        y_emb = self.y_embedder(y).view(batch_size, 1, self.hidden_size)
+        conditioning = nn.functional.silu(t_emb + y_emb)
+
+        patch_feature = None
+        for block_index, block in enumerate(self.patch_blocks):
+            tokens = block(tokens, conditioning, pos, mask)
+            if block_index == return_patch_feature_at:
+                patch_feature = tokens
+
+        output_tokens = self.final_layer(tokens, conditioning)
+        output_tokens = output_tokens.transpose(1, 2).contiguous()
+        output = torch.nn.functional.fold(
+            output_tokens,
+            output_size=(height, width),
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        )
+
+        if return_patch_feature_at is not None:
+            if patch_feature is None:
+                raise ValueError(
+                    "Requested patch feature layer is out of range: "
+                    f"index={return_patch_feature_at}, "
+                    f"depth={len(self.patch_blocks)}."
+                )
+            return output, patch_feature
+        return output
 
 
 class PixelTokenEmbedder(nn.Module):

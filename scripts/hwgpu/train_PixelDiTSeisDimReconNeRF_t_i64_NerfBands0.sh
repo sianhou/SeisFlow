@@ -22,7 +22,7 @@ TRAIN_JOB="PixelDiTSeisDimReconNeRF.py train \
 --output_dir $RUN_DIR/ \
 --model_arch T \
 --batch_size 32 \
---num_epochs 1001 \
+--num_epochs 2000 \
 --save_every_epochs 100 \
 --pin_memory \
 --device cuda \

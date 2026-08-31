@@ -7,7 +7,7 @@ from torch import nn
 
 from core.training.model_utils import count_model_parameters
 from flow_matching.utils import ModelWrapper
-from models.pixeldit import PixDiT
+from models.pixeldit import AugmentedDiT2DModel, PixDiT
 from diffusers.training_utils import EMAModel as EMA
 
 TRAINING_STATE_NAME = "training_state.pth"
@@ -131,6 +131,15 @@ Pixel_DiT_2D_CONFIGS = {
         "patch_depth": 8,
         "pixel_depth": 2,
     },
+}
+
+AUGMENTED_DIT_2D_CONFIGS = {
+    name: {
+        "num_groups": config["num_groups"],
+        "hidden_size": config["hidden_size"],
+        "depth": config["patch_depth"],
+    }
+    for name, config in Pixel_DiT_2D_CONFIGS.items()
 }
 
 
@@ -544,6 +553,8 @@ def build_dit_transformer_2d_wrapper(
 class PixelDiT2DWrapper(nn.Module):
     """Wrapper that exposes a common training/checkpoint interface for ``PixDiT``."""
 
+    model_cls = PixDiT
+
     def __init__(self, model: PixDiT):
         super().__init__()
         self.model = model
@@ -658,7 +669,7 @@ class PixelDiT2DWrapper(nn.Module):
             **kwargs,
     ):
         save_directory = Path(save_directory)
-        model = PixDiT.from_pretrained(
+        model = cls.model_cls.from_pretrained(
             save_directory,
             local_files_only=True,
             **kwargs,
@@ -711,6 +722,50 @@ class PixelDiT2DWrapper(nn.Module):
         return wrapper, int(training_state.get("epoch", 0)), training_state
 
 
+class AugmentedDiT2DWrapper(PixelDiT2DWrapper):
+    """Common training/checkpoint interface for ``AugmentedDiT2DModel``."""
+
+    model_cls = AugmentedDiT2DModel
+
+    def __init__(self, model: AugmentedDiT2DModel):
+        super().__init__(model)
+
+    def forward(self, x, timesteps, extra=None):
+        if extra is None:
+            extra = {}
+
+        conditioning = extra.get("concat_conditioning")
+        if conditioning is not None:
+            x = torch.cat((x, conditioning), dim=1)
+
+        labels = extra.get("label")
+        if labels is None:
+            labels = torch.zeros(
+                x.shape[0],
+                dtype=torch.long,
+                device=x.device,
+            )
+
+        output = self.model(
+            x,
+            timesteps,
+            labels,
+            mask=extra.get("mask"),
+            return_patch_feature_at=self.repa_align_index,
+        )
+
+        if self.repa_projection is None:
+            return output
+
+        prediction, patch_feature = output
+        with torch.autocast(
+                device_type=patch_feature.device.type,
+                enabled=False,
+        ):
+            projected_feature = self.repa_projection(patch_feature.float())
+        return prediction, projected_feature
+
+
 def build_pixeldit_2d_wrapper(
         model_arch="PixelDiT_XL",
         in_channels=4,
@@ -760,6 +815,49 @@ def build_pixeldit_2d_wrapper(
         upcast_attention=upcast_attention,
     )
     wrapper = PixelDiT2DWrapper(model)
+    if device is not None:
+        wrapper = wrapper.to(device)
+    return wrapper
+
+
+def build_augmented_dit_2d_wrapper(
+        model_arch="T",
+        in_channels=4,
+        out_channels=None,
+        num_groups=None,
+        hidden_size=None,
+        depth=None,
+        patch_size=2,
+        num_classes=1000,
+        max_period=10,
+        upcast_attention=False,
+        device=None,
+):
+    """Build a standalone patch-level augmented DiT from a named preset."""
+    if model_arch not in AUGMENTED_DIT_2D_CONFIGS:
+        supported = ", ".join(sorted(AUGMENTED_DIT_2D_CONFIGS))
+        raise ValueError(
+            f"Unsupported AugmentedDiT architecture {model_arch!r}. "
+            f"Supported architectures: {supported}."
+        )
+
+    architecture = AUGMENTED_DIT_2D_CONFIGS[model_arch]
+    num_groups = architecture["num_groups"] if num_groups is None else num_groups
+    hidden_size = architecture["hidden_size"] if hidden_size is None else hidden_size
+    depth = architecture["depth"] if depth is None else depth
+
+    model = AugmentedDiT2DModel(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        num_groups=num_groups,
+        hidden_size=hidden_size,
+        depth=depth,
+        patch_size=patch_size,
+        num_classes=num_classes,
+        max_period=max_period,
+        upcast_attention=upcast_attention,
+    )
+    wrapper = AugmentedDiT2DWrapper(model)
     if device is not None:
         wrapper = wrapper.to(device)
     return wrapper
