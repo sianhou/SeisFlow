@@ -12,6 +12,12 @@
   4. 仅在 i128 对共同目标区域产生稳定收益后继续完整训练和整炮比较；否则暂停扩大 patch，不进入 i256。
 - 最后更新：2026-08-28
 
+### [AugmentedDiT 架构对照](directions_augmented_dit.md)
+
+- 当前判断：AugmentedDiT 的模型、wrapper、独立训练/采样入口、hwgpu 训练/重建脚本和定向测试已经完成，可以启动 T/P4、i64、NeRF bands0 的端到端对照；尚无训练结果，不能判断其效果优于或劣于传统 DiT。
+- 下一步计划：启动 AugmentedDiT-T/P4 i64 bands0 训练，按每100 epoch与 DiT-T/P4 比较同一验证集的 PSNR、MSE、收敛、显存和计算成本；若存在稳定差异，再统一时间编码或参数预算做归因消融。
+- 最后更新：2026-08-31
+
 ## 重要
 
 ## 保留
