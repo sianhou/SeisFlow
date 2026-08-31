@@ -23,7 +23,7 @@ TRAIN_JOB="AugmentedDiTSeisDimReconNeRF.py train \
 --model_arch T \
 --patch_size 4 \
 --upcast_attention \
---max_period 10000 \
+--max_period 10 \
 --batch_size 32 \
 --num_epochs 2000 \
 --save_every_epochs 100 \
