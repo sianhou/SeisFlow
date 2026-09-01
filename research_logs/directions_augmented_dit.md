@@ -1,7 +1,7 @@
 # 研究方向：AugmentedDiT 架构对照
 
-- 级别：下一步重点
-- 最后更新：2026-08-31
+- 级别：保留
+- 最后更新：2026-09-01
 
 ## 研究目的
 
@@ -11,9 +11,9 @@
 
 ## 当前结论
 
-- 当前判断：AugmentedDiT 的模型、wrapper、独立训练/采样入口、hwgpu 训练/重建脚本和定向测试已经完成，可以启动 T/P4、i64、NeRF bands0 的端到端对照；尚无训练结果，不能判断其效果优于或劣于传统 DiT。
-- 主要证据：新模型已通过矩形前向、反向传播、条件通道拼接、REPA 中间特征、checkpoint 配置恢复和 `max_period` 行为测试；相关 AugmentedDiT、PixelDiT、DiT 训练入口定向测试共25项通过，两个 hwgpu shell 脚本通过 `bash -n`。
-- 局限或尚未确认的问题：当前对照匹配了 T/P4 的宽度384、深度8、6个 attention heads 和64×64输入下256个 token，但不是严格等参数实验；按2维原始坐标、NeRF bands0和1个噪声通道计算，AugmentedDiT约21.83M参数，DiT约23.58M参数，前者少约7.4%。AugmentedDiT使用 `max_period=10`，而 Diffusers DiT 保留默认时间编码；RMSNorm、2D RoPE、QK Norm、无 QKV bias 和 gated FFN 也同时变化，因此端到端结果不能直接归因于某一个组件。
+- 当前判断：在 T/P4、i64、NeRF bands0、EMA 的75炮对照中，AugmentedDiT 相比传统 DiT 有轻微改进，但尚不足以说明存在显著架构优势。
+- 主要证据：epoch 2000 的平均 PSNR 为22.984 dB，对照为22.762 dB（+0.222 dB）；平均 SSIM为0.7535，对照为0.7365；MSE和MAE分别降低2.68%和3.92%。AugmentedDiT 在75炮中的 PSNR、MSE均胜出51炮，SSIM胜出75炮，并在20个checkpoint中的19个取得更高平均PSNR。
+- 局限或尚未确认的问题：最大绝对误差略差0.97%，复杂断层和强干涉区域仍是两种模型的主要困难；当前只有一个随机种子，且两者参数量、时间编码、归一化、RoPE、QK Norm和FFN设计并非完全一致，不能把轻微增益归因于单一模块。
 
 ## 实验记录
 
@@ -37,6 +37,96 @@
 - 关键配置：AugmentedDiT-T/P4、i64、NeRF bands0、`max_period=10`、upcast attention、batch size 32/process、2000 epochs、EMA decay 0.999、seed 0、solver step size 0.05、clip `[-1,1]`。
 - Checkpoint：尚未生成。
 - 结果目录：训练根目录计划为 `$PROJ_DIR/train_AugmentedDiTSeisDimReconNeRF_t_i64_NerfBands0/`，重建根目录计划为 `$PROJ_DIR/recon_AugmentedDiTSeisDimReconNeRF_t_i64_NerfBands0/`；具体运行子目录待训练后记录。
+
+### 2026-09-01：AugmentedDiT 与传统 DiT 重建结果对比
+
+- 目的：比较两种 T/P4、i64、NeRF bands0 模型在相同75炮验证集上的重建效果。
+- 方法与配置：比较 AugmentedDiT EMA（下文A）与 DiT EMA（下文B）的 epoch 100–2000 重建结果；两者均使用 patch size 4，最终逐炮统计取 epoch 2000。DiT 非EMA结果仅用于说明EMA收益，不作为架构主对照。
+- 对照：`recon_DiTSeisDimReconNeRF_t_p4_i64_NeRFBands0` 中的 EMA 结果。AugmentedDiT 结果目录未在名称中写 `ema`，但重建使用默认开启的 `use_ema=True`，因此A是EMA结果。
+- 结果：AugmentedDiT 的平均 PSNR/SSIM为22.984 dB/0.7535，DiT为22.762 dB/0.7365；AugmentedDiT 的 MSE和MAE分别降低2.68%和3.92%，但最大绝对误差增加0.97%。
+- 观察：AugmentedDiT 在收敛中前期优势更明显，最终优势缩小；简单连续层状结构两者都较好，复杂断层和强干涉区域仍较差。
+- 解释：当前结果支持“AugmentedDiT 有轻微改进”，不支持大幅提升或已解决局部复杂区恢复问题。
+
+#### Epoch 2000逐炮统计
+
+“最差/最好”均按指标方向定义：PSNR、SSIM越高越好，MSE、MAE、最大绝对误差越低越好。表中的最小值和最大值是75炮中的数值范围。
+
+| 指标 | A平均 | A最小–最大 | B平均 | B最小–最大 | A相对B变化 | A胜/平/负 |
+|---|---:|---:|---:|---:|---:|---:|
+| PSNR（dB） | 22.9842 | 17.4932–30.4151 | 22.7621 | 17.6250–30.1979 | +0.2221 dB | 51/0/24 |
+| SSIM | 0.75350 | 0.57049–0.91032 | 0.73651 | 0.55075–0.90048 | +0.01699 | 75/0/0 |
+| MSE | 0.11536 | 0.01454–0.28497 | 0.11854 | 0.01529–0.27645 | 降低2.68% | 51/0/24 |
+| MAE | 0.14173 | 0.06241–0.25539 | 0.14751 | 0.06544–0.25641 | 降低3.92% | 68/0/7 |
+| 最大绝对误差 | 3.85205 | 2.34356–4.00000 | 3.81510 | 2.09362–4.00000 | 增加0.97% | 12/53/10 |
+
+- A在PSNR和MSE上胜出51/75炮，在MAE上胜出68/75炮，SSIM在75炮上全部胜出。
+- 最大绝对误差不支持A更好：两组大量结果达到裁剪上限4.0，53炮持平，A仅胜出12炮，因此该指标区分度有限。
+
+![Epoch 2000平均指标变化和逐炮胜率](images/20260901/augmented_dit_final_metric_improvement_and_win_rate.png)
+
+#### Checkpoint收敛与稳定性
+
+| 指标 | A最好（epoch） | A最差（epoch） | A平均 | B最好（epoch） | B最差（epoch） | B平均 | A胜出 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| PSNR（dB） | 22.9842（2000） | 15.0166（100） | 20.6505 | 22.7621（2000） | 15.1557（100） | 20.2653 | 19/20 |
+| SSIM | 0.75350（2000） | 0.38192（100） | 0.64582 | 0.73651（2000） | 0.36193（100） | 0.61919 | 20/20 |
+| MSE | 0.11412（1500） | 0.50539（100） | 0.19168 | 0.11822（1900） | 0.48914（100） | 0.20591 | 19/20 |
+| MAE | 0.14173（2000） | 0.39105（100） | 0.20186 | 0.14751（2000） | 0.38984（100） | 0.21437 | 19/20 |
+| 最大绝对误差 | 3.85205（2000） | 3.99999（100） | 3.93731 | 3.81102（1900） | 3.99994（400） | 3.91747 | 3/20 |
+
+- A的平均PSNR在20个checkpoint中的19个高于B，SSIM在20个checkpoint中全部更高，说明轻微优势并非只来自单个checkpoint。
+- A的平均PSNR领先在epoch 900附近最大，约为0.647 dB；到epoch 2000缩小至0.222 dB，主要体现为收敛更快和最终小幅领先。
+- 按MSE选择时，A的最佳checkpoint是epoch 1500（0.11412），B是epoch 1900（0.11822）；最终PSNR和SSIM则均在epoch 2000最好。
+
+![各指标随checkpoint变化](images/20260901/augmented_dit_metrics_vs_epoch.png)
+
+![checkpoint最好、最差和平均表现](images/20260901/augmented_dit_epoch_best_worst_average.png)
+
+#### 最好、最差和差异最大的炮
+
+| 情况 | 炮号 | A PSNR（dB） | B PSNR（dB） | A−B（dB） |
+|---|---|---:|---:|---:|
+| 两者最好 | `shot_0039` | 30.4151 | 30.1979 | +0.2171 |
+| A最差 | `shot_0127` | 17.4932 | 17.6651 | -0.1720 |
+| B最差 | `shot_0128` | 17.7323 | 17.6250 | +0.1073 |
+| A提升最大 | `shot_0237` | 26.3316 | 23.2281 | +3.1035 |
+| A退化最大 | `shot_0097` | 21.2269 | 21.9470 | -0.7201 |
+
+- 两种模型的最好结果均为 `shot_0039`，A略高0.217 dB。
+- A不是对每炮都更好：`shot_0097`退化0.720 dB，说明平均收益不能替代困难炮检查。
+- 从重建与误差图观察，简单、连续层状同相轴两者均能较好恢复；密集断层、弯曲或交叉同相轴和强干涉区域仍容易出现结构、振幅与相位误差，误差具有连续事件形态，而非单纯随机噪声。
+
+![各模型最佳PSNR checkpoint的逐炮分布](images/20260901/augmented_dit_best_checkpoint_shot_distributions.png)
+
+![Epoch 2000逐炮配对差异](images/20260901/augmented_dit_paired_improvement_by_shot.png)
+
+#### EMA影响
+
+| 指标 | DiT EMA | DiT非EMA | EMA变化 |
+|---|---:|---:|---:|
+| PSNR（dB） | 22.7621 | 22.0469 | +0.7152 dB |
+| SSIM | 0.73651 | 0.71826 | +0.01825 |
+| MSE | 0.11854 | 0.13100 | 降低9.51% |
+| MAE | 0.14751 | 0.16036 | 降低8.01% |
+| 最大绝对误差 | 3.81510 | 3.91828 | 降低2.63% |
+
+- DiT的EMA结果明显优于非EMA结果，因此架构结论必须使用A-EMA与B-EMA比较；若误把B的非EMA结果作为对照，会夸大AugmentedDiT的收益。
+
+#### 综合结论
+
+1. AugmentedDiT 相比传统 DiT 有轻微且较稳定的整体改进：最终平均PSNR提高0.222 dB，SSIM全面占优，MSE和MAE小幅下降。
+2. 改进主要体现为平均质量和收敛速度，不是数量级提升；最终阶段的领先幅度小于中期。
+3. 最大绝对误差略差，部分炮仍退化，复杂局部结构的恢复难题没有解决。
+4. 当前仅有单随机种子且结构差异不止一个，因此尚不能断言收益来自 `AugmentedDiTBlock` 中的某个具体设计。
+
+#### 版本与实现
+
+- Git：`aa8b29d`（dirty）。
+- 未提交相关文件：`scripts/analysis/plot_augmented_dit_vs_dit.py`、`research_logs/images/20260901/*.png`、`research_logs/directions_augmented_dit.md`、`research_logs/directions_board.md`。
+- 入口脚本：`scripts/hwgpu/recon_AugmentedDiTSeisDimReconNeRF_t_i64_NerfBands0.sh`；对照为对应的 DiT recon 脚本。
+- 主要代码：`AugmentedDiTSeisDimReconNeRF.py`、`DiTSeisDimReconNeRF.py`、`scripts/analysis/plot_augmented_dit_vs_dit.py`。
+- 关键配置：T/P4、i64、NeRF bands0、EMA、75炮、epoch 100–2000。
+- 结果目录：`temp/new/recon_AugmentedDiTSeisDimReconNeRF_t_i64_NerfBands0/`、`temp/new/recon_DiTSeisDimReconNeRF_t_p4_i64_NeRFBands0/`、`temp/new/AugmentedDiT_vs_DiT_i64_NeRFBands0_statistics/`。
 
 ## 测试设计
 
@@ -76,7 +166,6 @@
 
 ## 下一步
 
-1. 启动 AugmentedDiT-T/P4 i64 bands0 训练，并确认首个 batch、显存、loss、EMA 更新和 checkpoint 保存正常。
-2. 按每100 epoch运行标准 patch 推理、整炮重建和差值生成，与 DiT-T/P4 使用同一75炮验证集比较 PSNR、MSE和收敛曲线。
-3. 记录两组实际节点型号、吞吐、GPU-hours、checkpoint和结果目录；若节点硬件不同，不直接比较 wall-clock。
-4. 根据端到端结果决定是否补充 `max_period=10000` 或统一 timestep embedding 的严格 block 消融。
+1. 补充随机种子重复实验，确认约0.22 dB的PSNR增益是否稳定。
+2. 重点比较困难炮和局部复杂区，并记录显存、吞吐与GPU-hours，判断轻微精度收益是否值得额外成本。
+3. 若增益稳定，再统一时间编码或参数预算，对RMSNorm、RoPE、QK Norm和FFN做归因消融。

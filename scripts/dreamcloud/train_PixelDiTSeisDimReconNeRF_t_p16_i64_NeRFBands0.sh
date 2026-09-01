@@ -6,7 +6,7 @@ DREAMCLOUD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DREAMCLOUD_SCRIPT_DIR/env.sh"
 
 DATA_DIR="$PROJ_DIR/shot_dataset64"
-NODES_LIST="${NODES_LIST:-node046,node047,node048,node049,node050}"
+NODES_LIST="${NODES_LIST:-node041,node043,node044}"
 if [[ -n "$NODES_LIST" ]]; then
     NUM_WORKERS="$(awk -F',' '{print NF}' <<< "$NODES_LIST")"
 else
@@ -22,7 +22,7 @@ TRAIN_JOB="PixelDiTSeisDimReconNeRF.py train \
 --input_dim_dir $DATA_DIR/train_dim/ \
 --output_dir $RUN_DIR/ \
 --model_arch T \
---patch_size 4 \
+--patch_size 16 \
 --batch_size $BATCH_SIZE \
 --num_epochs 2000 \
 --save_every_epochs 100 \
