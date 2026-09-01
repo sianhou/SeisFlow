@@ -50,6 +50,7 @@ class PixelDiTSeisDimReconNeRFTrainer(Trainer):
             in_channels=1 + nerf_dim_channels,
             out_channels=1,
             num_classes=1,
+            patch_size=self.args.patch_size,
             upcast_attention=self.args.upcast_attention,
             device=self.device,
         )
@@ -256,6 +257,7 @@ def build_parser():
     parser.add_argument("--solver_step_size", default=0.05, type=float)
     parser.add_argument("--clip_recon", nargs=2, type=float, default=None, metavar=("MIN", "MAX"))
     parser.add_argument("--batch_size", default=32, type=int)
+    parser.add_argument("--patch_size", default=16, type=int)
     parser.add_argument("--grad_accum_steps", default=1, type=int)
     parser.add_argument("--clip_grad", default=1.0, type=float)
     parser.add_argument(
