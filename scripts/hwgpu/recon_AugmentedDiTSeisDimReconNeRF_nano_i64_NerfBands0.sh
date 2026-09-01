@@ -6,11 +6,11 @@ HWGPU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HWGPU_SCRIPT_DIR/env.sh"
 
 SCRIPT_NAME="$(basename "$0" .sh)"
-DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset64}"
+DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset64_nano}"
 RUN_DIR="${RUN_DIR:-$PROJ_DIR/$SCRIPT_NAME}"
 TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
 TRAIN_ROOT="${TRAIN_ROOT:-$PROJ_DIR/$TRAIN_SCRIPT_NAME}"
-NPROC_PER_NODE_T="${NPROC_PER_NODE_T:-$NPROC_PER_NODE}"
+NPROC_PER_NODE_NANO="${NPROC_PER_NODE_NANO:-$NPROC_PER_NODE}"
 RECON_BATCH_SIZE="${RECON_BATCH_SIZE:-32}"
 EPOCH_START="${EPOCH_START:-100}"
 EPOCH_END="${EPOCH_END:-2000}"
@@ -18,29 +18,29 @@ EPOCH_STEP="${EPOCH_STEP:-100}"
 
 [[ -x "${TORCHRUN_BIN}" ]] || { echo "torchrun not found: ${TORCHRUN_BIN}" >&2; exit 1; }
 [[ -x "${PYTHON_BIN}" ]] || { echo "Python not found: ${PYTHON_BIN}" >&2; exit 1; }
-[[ -d "${DATA_DIR}/valid_dim" ]] || { echo "T validation dimension data not found: ${DATA_DIR}/valid_dim" >&2; exit 1; }
-[[ -d "${DATA_DIR}/valid_aux" ]] || { echo "T validation metadata not found: ${DATA_DIR}/valid_aux" >&2; exit 1; }
-[[ -d "${DATA_DIR}/shot" ]] || { echo "T original shot data not found: ${DATA_DIR}/shot" >&2; exit 1; }
-[[ "${NPROC_PER_NODE_T}" =~ ^[1-9][0-9]*$ ]] || { echo "NPROC_PER_NODE_T must be a positive integer" >&2; exit 1; }
+[[ -d "${DATA_DIR}/valid_dim" ]] || { echo "Nano validation dimension data not found: ${DATA_DIR}/valid_dim" >&2; exit 1; }
+[[ -d "${DATA_DIR}/valid_aux" ]] || { echo "Nano validation metadata not found: ${DATA_DIR}/valid_aux" >&2; exit 1; }
+[[ -d "${DATA_DIR}/shot" ]] || { echo "Nano original shot data not found: ${DATA_DIR}/shot" >&2; exit 1; }
+[[ "${NPROC_PER_NODE_NANO}" =~ ^[1-9][0-9]*$ ]] || { echo "NPROC_PER_NODE_NANO must be a positive integer" >&2; exit 1; }
 [[ "${EPOCH_START}" =~ ^[1-9][0-9]*$ ]] || { echo "EPOCH_START must be a positive integer" >&2; exit 1; }
 [[ "${EPOCH_END}" =~ ^[1-9][0-9]*$ ]] || { echo "EPOCH_END must be a positive integer" >&2; exit 1; }
 [[ "${EPOCH_STEP}" =~ ^[1-9][0-9]*$ ]] || { echo "EPOCH_STEP must be a positive integer" >&2; exit 1; }
 (( EPOCH_START <= EPOCH_END )) || { echo "EPOCH_START must not exceed EPOCH_END" >&2; exit 1; }
 
 if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
-    [[ -d "${TRAIN_ROOT}" ]] || { echo "T training root not found: ${TRAIN_ROOT}" >&2; exit 1; }
+    [[ -d "${TRAIN_ROOT}" ]] || { echo "Nano training root not found: ${TRAIN_ROOT}" >&2; exit 1; }
     TRAIN_RUN_DIR="$(find "${TRAIN_ROOT}" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
 fi
-[[ -d "${TRAIN_RUN_DIR}" ]] || { echo "T training run directory not found: ${TRAIN_RUN_DIR}" >&2; exit 1; }
+[[ -d "${TRAIN_RUN_DIR}" ]] || { echo "Nano training run directory not found: ${TRAIN_RUN_DIR}" >&2; exit 1; }
 
 mkdir -p "${RUN_DIR}"
 cd "${CODE_PATH}"
 
-echo "Reconstructing AugmentedDiT T checkpoints"
+echo "Reconstructing AugmentedDiT Nano checkpoints"
 echo "  data: ${DATA_DIR}"
 echo "  training run: ${TRAIN_RUN_DIR}"
 echo "  output: ${RUN_DIR}"
-echo "  processes: ${NPROC_PER_NODE_T}"
+echo "  processes: ${NPROC_PER_NODE_NANO}"
 echo "  epochs: ${EPOCH_START}:${EPOCH_STEP}:${EPOCH_END}"
 
 for epoch in $(seq "${EPOCH_START}" "${EPOCH_STEP}" "${EPOCH_END}"); do
@@ -55,7 +55,7 @@ for epoch in $(seq "${EPOCH_START}" "${EPOCH_STEP}" "${EPOCH_END}"); do
     echo "Reconstructing epoch ${epoch} from ${checkpoint_dir}"
     "${TORCHRUN_BIN}" \
         --nnodes=1 \
-        --nproc_per_node="${NPROC_PER_NODE_T}" \
+        --nproc_per_node="${NPROC_PER_NODE_NANO}" \
         --node_rank=0 \
         --master_addr="${MASTER_ADDR}" \
         --master_port="${MASTER_PORT}" \
@@ -64,7 +64,7 @@ for epoch in $(seq "${EPOCH_START}" "${EPOCH_STEP}" "${EPOCH_END}"); do
         --input_dim_dir "${DATA_DIR}/valid_dim" \
         --output_dir "${RUN_DIR}" \
         --log_id "valid_epoch_${epoch_name}" \
-        --model_arch T \
+        --model_arch Nano \
         --patch_size 4 \
         --max_period 10 \
         --batch_size "${RECON_BATCH_SIZE}" \

@@ -141,6 +141,11 @@ AUGMENTED_DIT_2D_CONFIGS = {
     }
     for name, config in Pixel_DiT_2D_CONFIGS.items()
 }
+AUGMENTED_DIT_2D_CONFIGS["Nano"] = {
+    "num_groups": 3,
+    "hidden_size": 192,
+    "depth": 4,
+}
 
 
 class VelocityModel(ModelWrapper):
