@@ -10,7 +10,10 @@ RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
 DATA_DIR="$PROJ_DIR/shot_dataset64"
 TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
 TRAIN_ROOT="$PROJ_DIR/$TRAIN_SCRIPT_NAME"
-TRAIN_RUN_DIR="${TRAIN_RUN_DIR:-$TRAIN_ROOT}"
+
+if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
+    TRAIN_RUN_DIR="$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+fi
 
 [[ -x "$TORCHRUN_BIN" ]] || { echo "torchrun not found: $TORCHRUN_BIN" >&2; exit 1; }
 [[ -x "$PYTHON_BIN" ]] || { echo "Python not found: $PYTHON_BIN" >&2; exit 1; }

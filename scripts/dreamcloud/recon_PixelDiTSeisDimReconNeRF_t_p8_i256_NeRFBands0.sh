@@ -7,7 +7,7 @@ source "$DREAMCLOUD_SCRIPT_DIR/env.sh"
 
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
-DATA_DIR="$PROJ_DIR/shot_dataset64"
+DATA_DIR="$PROJ_DIR/shot_dataset256"
 TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
 TRAIN_ROOT="$PROJ_DIR/$TRAIN_SCRIPT_NAME"
 
@@ -52,7 +52,7 @@ for epoch in $(seq 100 100 2000); do
         --output_dir "$RUN_DIR" \
         --log_id "valid_ema_epoch_${epoch_name}" \
         --model_arch T \
-        --patch_size 2 \
+        --patch_size 8 \
         --batch_size 32 \
         --solver_step_size 0.05 \
         --clip_recon -1 1 \
