@@ -474,6 +474,8 @@ class DiTTransformer2DWrapper(nn.Module):
             )
             if ema is not None:
                 ema.load_state_dict(loaded_ema.state_dict())
+                # Loading replaces shadow tensors with CPU checkpoint tensors.
+                ema.to(device=next(ema_model.parameters()).device)
             if use_ema:
                 loaded_ema.copy_to(ema_model.parameters())
 
@@ -692,6 +694,8 @@ class PixelDiT2DWrapper(nn.Module):
             )
             if ema is not None:
                 ema.load_state_dict(loaded_ema.state_dict())
+                # Loading replaces shadow tensors with CPU checkpoint tensors.
+                ema.to(device=next(ema_model.parameters()).device)
             if use_ema:
                 loaded_ema.copy_to(ema_model.parameters())
 
