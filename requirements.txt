@@ -1,0 +1,31 @@
+# Direct dependencies for training, reconstruction, analysis, and tests.
+# Install with: python -m pip install -r requirements.txt
+# Versions are intentionally unpinned; this is not an environment lockfile.
+# For CUDA, install matching torch/torchvision builds for your platform first.
+# flow_matching is bundled in this repository; do not install it separately.
+# DINOv2 code and pretrained weights are loaded separately through torch.hub.
+
+# Deep learning and flow matching solvers
+torch
+torchvision
+diffusers
+timm
+torchdiffeq
+
+# Numerical computing, SEG-Y data, and visualization
+numpy
+scipy
+segyio
+matplotlib
+Pillow
+
+# Metrics (including FID in training/eval_loop.py)
+torchmetrics
+torch-fidelity
+
+# Progress reporting and system information
+tqdm
+psutil
+
+# Test suite
+pytest
