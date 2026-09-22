@@ -3,8 +3,10 @@
 set -euo pipefail
 
 SIANDGX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MASTER_PORT="${MASTER_PORT:-29512}"
 source "$SIANDGX_SCRIPT_DIR/env.sh"
+
+# Run one local Python process, even if distributed settings were inherited.
+unset RANK WORLD_SIZE LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK SLURM_PROCID
 
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="${RUN_DIR:-$PROJ_DIR/$SCRIPT_NAME}"
@@ -19,7 +21,6 @@ if [[ -z "${TRAIN_RUN_DIR:-}" ]]; then
     TRAIN_RUN_DIR="$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
 fi
 
-[[ -x "$TORCHRUN_BIN" ]] || { echo "torchrun not found: $TORCHRUN_BIN" >&2; exit 1; }
 [[ -x "$PYTHON_BIN" ]] || { echo "Python not found: $PYTHON_BIN" >&2; exit 1; }
 [[ -d "$DATA_DIR/valid_dim" ]] || { echo "Validation dimension data not found: $DATA_DIR/valid_dim" >&2; exit 1; }
 [[ -d "$DATA_DIR/valid_aux" ]] || { echo "Validation metadata not found: $DATA_DIR/valid_aux" >&2; exit 1; }
@@ -27,10 +28,17 @@ fi
 [[ -d "$TRAIN_RUN_DIR" ]] || { echo "Training run directory not found: $TRAIN_RUN_DIR" >&2; exit 1; }
 
 mkdir -p "$RUN_DIR"
+# Run sampling, shot reconstruction and differences sequentially in one job.
+if [[ "${1:-}" != "--background" ]]; then
+    export TRAIN_RUN_DIR
+    nohup bash "$SIANDGX_SCRIPT_DIR/$SCRIPT_NAME.sh" --background "$@" \
+        > "$RUN_DIR/launcher.log" 2>&1 < /dev/null &
+    echo "$!" > "$RUN_DIR/launcher.pid"
+    exit 0
+fi
+shift
 cd "$CODE_PATH"
 
-echo "MASTER_ADDR: $MASTER_ADDR"
-echo "NPROC_PER_NODE: $NPROC_PER_NODE"
 echo "TRAIN_RUN_DIR: $TRAIN_RUN_DIR"
 echo "OUTPUT_DIR: $RUN_DIR"
 
@@ -47,13 +55,7 @@ for epoch in $(seq "$FIRST_EPOCH" "$EPOCH_STEP" "$LAST_EPOCH"); do
     [[ -d "$checkpoint_dir" ]] || { echo "Checkpoint not found: $checkpoint_dir" >&2; exit 1; }
 
     echo "Reconstructing epoch $epoch with EMA weights from $checkpoint_dir"
-    "$TORCHRUN_BIN" \
-        --nnodes=1 \
-        --nproc_per_node="$NPROC_PER_NODE" \
-        --node_rank=0 \
-        --master_addr="$MASTER_ADDR" \
-        --master_port="$MASTER_PORT" \
-        AugmentedDiTSeisDimReconNeRFDirect.py sample \
+    "$PYTHON_BIN" "$CODE_PATH/AugmentedDiTSeisDimReconNeRFDirect.py" sample \
         --ckpt "$checkpoint_dir" \
         --input_dim_dir "$DATA_DIR/valid_dim" \
         --output_dir "$RUN_DIR" \

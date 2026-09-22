@@ -5,14 +5,13 @@ set -euo pipefail
 SIANDGX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SIANDGX_SCRIPT_DIR/env.sh"
 
-# Run one local Python process, even if distributed settings were inherited.
+# Ignore inherited distributed-launch settings; run one local Python process.
 unset RANK WORLD_SIZE LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK SLURM_PROCID
 
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="${RUN_DIR:-$PROJ_DIR/$SCRIPT_NAME}"
-DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset128_50shots}"
+DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset64_50shots}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-NERF_BANDS="${NERF_BANDS:-6}"
 TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
 TRAIN_ROOT="${TRAIN_ROOT:-$PROJ_DIR/$TRAIN_SCRIPT_NAME}"
 
@@ -28,7 +27,7 @@ fi
 [[ -d "$TRAIN_RUN_DIR" ]] || { echo "Training run directory not found: $TRAIN_RUN_DIR" >&2; exit 1; }
 
 mkdir -p "$RUN_DIR"
-# Run sampling, shot reconstruction and differences sequentially in one job.
+# Keep sampling, shot reconstruction and difference calculation in one background job.
 if [[ "${1:-}" != "--background" ]]; then
     export TRAIN_RUN_DIR
     nohup bash "$SIANDGX_SCRIPT_DIR/$SCRIPT_NAME.sh" --background "$@" \
@@ -55,7 +54,7 @@ for epoch in $(seq "$FIRST_EPOCH" "$EPOCH_STEP" "$LAST_EPOCH"); do
     [[ -d "$checkpoint_dir" ]] || { echo "Checkpoint not found: $checkpoint_dir" >&2; exit 1; }
 
     echo "Reconstructing epoch $epoch with EMA weights from $checkpoint_dir"
-    "$PYTHON_BIN" "$CODE_PATH/AugmentedDiTSeisDimReconNeRFDirect.py" sample \
+    "$PYTHON_BIN" "$CODE_PATH/AugmentedDiTSeisDimReconNeRF.py" sample \
         --ckpt "$checkpoint_dir" \
         --input_dim_dir "$DATA_DIR/valid_dim" \
         --output_dir "$RUN_DIR" \
@@ -63,10 +62,11 @@ for epoch in $(seq "$FIRST_EPOCH" "$EPOCH_STEP" "$LAST_EPOCH"); do
         --model_arch T \
         --patch_size 4 \
         --batch_size "$BATCH_SIZE" \
+        --solver_step_size 0.05 \
         --clip_recon -1 1 \
         --pin_memory \
         --device cuda \
-        --nerf_bands "$NERF_BANDS" \
+        --nerf_bands 0 \
         --use_ema \
         --log_console
 
