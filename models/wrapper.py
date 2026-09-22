@@ -8,6 +8,7 @@ from torch import nn
 from core.training.model_utils import count_model_parameters
 from flow_matching.utils import ModelWrapper
 from models.pixeldit import AugmentedDiT2DModel, PixDiT
+from models.unet2 import UNet2DModel
 from diffusers.training_utils import EMAModel as EMA
 
 TRAINING_STATE_NAME = "training_state.pth"
@@ -145,6 +146,17 @@ AUGMENTED_DIT_2D_CONFIGS["Nano"] = {
     "num_groups": 3,
     "hidden_size": 192,
     "depth": 4,
+}
+
+# Approximate AugmentedDiT parameter budgets with a three-level UNet.
+# Counts use in_channels=3, out_channels=1, num_classes=1 (millions).
+#             UNet / AugmentedDiT (patch_size=2)
+UNET_2D_CONFIGS = {
+    "Nano": {"model_channels": 32, "num_res_blocks": 1},   # 2.88 / 2.83
+    "T": {"model_channels": 64, "num_res_blocks": 3},      # 21.52 / 21.81
+    "S": {"model_channels": 160, "num_res_blocks": 3},     # 134.05 / 129.47
+    "L": {"model_channels": 288, "num_res_blocks": 3},     # 433.91 / 418.83
+    "XL": {"model_channels": 352, "num_res_blocks": 3},    # 648.04 / 625.66
 }
 
 
@@ -729,6 +741,33 @@ class PixelDiT2DWrapper(nn.Module):
             scaler.load_state_dict(training_state["amp_scaler"])
 
         return wrapper, int(training_state.get("epoch", 0)), training_state
+
+
+class UNet2DWrapper(PixelDiT2DWrapper):
+    """UNet adapter reusing the existing training/EMA checkpoint methods."""
+
+    model_cls = UNet2DModel
+
+    def forward(self, x, timesteps, extra=None):
+        extra = {} if extra is None else extra
+        conditioning = extra.get("concat_conditioning")
+        if conditioning is not None:
+            x = torch.cat((x, conditioning), dim=1)
+        return self.model(x, timesteps, extra.get("label"))
+
+
+def build_unet_2d_wrapper(
+        model_arch="T",
+        in_channels=3,
+        out_channels=1,
+        device=None,
+        **kwargs,
+):
+    """Build a UNet preset; kwargs override model settings, including time encoding."""
+    config = {**UNET_2D_CONFIGS[model_arch], **kwargs}
+    model = UNet2DModel(in_channels=in_channels, out_channels=out_channels, **config)
+    wrapper = UNet2DWrapper(model)
+    return wrapper.to(device) if device is not None else wrapper
 
 
 class AugmentedDiT2DWrapper(PixelDiT2DWrapper):

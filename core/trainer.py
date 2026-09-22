@@ -31,10 +31,13 @@ class Dist:
             self.args.rank = self.rank
             self.args.world_size = self.world_size
 
+            process_group_kwargs = {}
             if torch.cuda.is_available() and self.args.device.startswith("cuda"):
                 self.args.gpu = int(os.environ.get("LOCAL_RANK", 0))
                 torch.cuda.set_device(self.args.gpu)
                 backend = "nccl"
+                # Bind NCCL to the local GPU, which may differ from global rank.
+                process_group_kwargs["device_id"] = torch.device("cuda", self.args.gpu)
             else:
                 backend = "gloo"
 
@@ -43,6 +46,7 @@ class Dist:
                 init_method="env://",
                 rank=self.rank,
                 world_size=self.world_size,
+                **process_group_kwargs,
             )
         else:
             self.args.distributed = False

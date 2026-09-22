@@ -4,8 +4,39 @@ import pytest
 import torch
 from torch import nn
 
-from core.trainer import Trainer
+from core.trainer import Dist, Trainer
 from core.training.amp_scaler import AMPGradScaler
+
+
+@pytest.mark.parametrize(
+    "device, rank, world_size, local_rank",
+    [("cuda", 5, 8, 1), ("cuda", 0, 1, 0), ("cpu", 5, 8, 1)],
+)
+def test_process_group_device_binding(monkeypatch, device, rank, world_size, local_rank):
+    monkeypatch.setenv("RANK", str(rank))
+    monkeypatch.setenv("WORLD_SIZE", str(world_size))
+    monkeypatch.setenv("LOCAL_RANK", str(local_rank))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    selected_devices = []
+    monkeypatch.setattr(torch.cuda, "set_device", selected_devices.append)
+    initialized = {}
+    monkeypatch.setattr(
+        torch.distributed, "init_process_group", lambda **kwargs: initialized.update(kwargs)
+    )
+
+    runtime = Dist(SimpleNamespace(device=device))
+    runtime._setup_distributed()
+
+    assert initialized["rank"] == rank
+    assert initialized["world_size"] == world_size
+    if device == "cuda":
+        assert selected_devices == [local_rank]
+        assert initialized["backend"] == "nccl"
+        assert initialized["device_id"] == torch.device("cuda", local_rank)
+    else:
+        assert selected_devices == []
+        assert initialized["backend"] == "gloo"
+        assert "device_id" not in initialized
 
 
 class ScalarModel(nn.Module):
