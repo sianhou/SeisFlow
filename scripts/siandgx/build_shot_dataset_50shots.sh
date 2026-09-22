@@ -18,11 +18,12 @@ SPLIT_SEED="${SPLIT_SEED:-0}"
     --output "${RANDOM_SEGY}" \
     --seed "${RANDOM_SEED}"
 
-for patch_size in 32 64 128; do
+for patch_size in 32 64 128 256; do
     case "${patch_size}" in
         32) overlap_size="${OVERLAP_SIZE_32:-16}" ;;
         64) overlap_size="${OVERLAP_SIZE_64:-32}" ;;
         128) overlap_size="${OVERLAP_SIZE_128:-64}" ;;
+        256) overlap_size="${OVERLAP_SIZE_256:-128}" ;;
     esac
 
     output_dir="$PROJ_DIR/shot_dataset${patch_size}_50shots"
