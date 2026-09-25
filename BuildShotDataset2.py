@@ -1,7 +1,8 @@
 import argparse
-import math
 import os
+import shutil
 
+import math
 import numpy as np
 
 
@@ -22,6 +23,10 @@ def build_parser():
     )
     parser.add_argument("--segy", required=True, help="Input SEG-Y file.")
     parser.add_argument(
+        "--gen-ref", action="store_true",
+        help="Generate aligned reference patches from the nearest other training shot.",
+    )
+    parser.add_argument(
         "--patch_size",
         default=256,
         type=int,
@@ -38,7 +43,8 @@ def build_parser():
         default="./dataset",
         help=(
             "Output root. Writes train, train_dim and, when --valid > 0, "
-            "valid and valid_dim."
+            "valid and valid_dim, with corresponding aux metadata. "
+            "--gen-ref also writes train_ref/valid_ref and their _dim/_aux directories."
         ),
     )
     parser.add_argument(
@@ -103,9 +109,11 @@ def validate_args(args):
         raise ValueError("--slice must be 0 0 or satisfy START < END.")
     if args.clip is not None and args.clip[0] > args.clip[1]:
         raise ValueError("--clip VMIN must be less than or equal to VMAX.")
-def build_output_dirs(output_dir):
+
+
+def build_output_dirs(output_dir, gen_ref=False):
     prefix = output_dir.rstrip(os.sep)
-    return {
+    directories = {
         "train": f"{prefix}/train",
         "train_dim": f"{prefix}/train_dim",
         "train_aux": f"{prefix}/train_aux",
@@ -113,6 +121,87 @@ def build_output_dirs(output_dir):
         "valid_dim": f"{prefix}/valid_dim",
         "valid_aux": f"{prefix}/valid_aux",
     }
+    if gen_ref:
+        for split in ("train", "valid"):
+            for suffix in ("", "_dim", "_aux"):
+                name = f"{split}_ref{suffix}"
+                directories[name] = os.path.join(output_dir, name)
+    return directories
+
+
+def build_reference_pairs(dataset, train_indices, slice_range):
+    """Select references in scaled source XY space; validate before writing patches.
+
+    Distances use the SEG-Y coordinate units (not necessarily metres). Existing
+    dim preprocessing is unchanged. Ties use the sorted shot index.
+    """
+    import segyio
+
+    if len(train_indices) < 2:
+        raise ValueError("--gen-ref requires at least 2 training shots (self-reference is excluded).")
+    coordinates = []
+    shapes = []
+    units = set()
+    width = dataset.nsamples
+    if slice_range != [0, 0]:
+        width = len(range(*slice(*slice_range).indices(width)))
+    if width == 0:
+        raise ValueError("--slice leaves no time samples.")
+    with segyio.open(dataset.filename, "r", ignore_geometry=True) as source:
+        for shot_id in dataset.shot_keys:
+            xy = []
+            traces = dataset.shot_dict[shot_id]
+            for trace in traces:
+                header = source.header[trace]
+                scalar = header[segyio.TraceField.SourceGroupScalar]
+                scale = scalar if scalar > 0 else 1.0 / abs(scalar) if scalar < 0 else 1.0
+                xy.append(np.asarray([
+                    header[segyio.TraceField.SourceX], header[segyio.TraceField.SourceY]
+                ], dtype=np.float64) * scale)
+                units.add(header[segyio.TraceField.CoordinateUnits])
+            if not np.allclose(xy, xy[0], rtol=0, atol=1e-8):
+                raise ValueError(f"Shot {shot_id} has inconsistent source coordinates across traces.")
+            coordinates.append(xy[0])
+            shapes.append((len(traces), width))
+    if len(units) != 1 or not units.issubset({0, 1}):
+        raise ValueError("--gen-ref requires consistent Cartesian source coordinate units (0 or 1).")
+    coordinates = np.asarray(coordinates, dtype=np.float64)
+    candidates = np.asarray(sorted(train_indices), dtype=np.int64)
+    pairs = {}
+    for target in range(len(dataset)):
+        eligible = candidates[candidates != target]
+        distances = np.linalg.norm(coordinates[eligible] - coordinates[target], axis=1)
+        nearest = int(np.argmin(distances))
+        reference = int(eligible[nearest])
+        if shapes[target] != shapes[reference]:
+            raise ValueError(
+                f"Shot {dataset.shot_keys[target]} shape {shapes[target]} differs from nearest "
+                f"training reference {dataset.shot_keys[reference]} shape {shapes[reference]}."
+            )
+        pairs[target] = (reference, float(distances[nearest]))
+    return pairs, coordinates
+
+
+def save_reference_patches(dataset, pairs, coordinates, valid_indices, output_dirs):
+    """Reuse processed training arrays so reference preprocessing is identical."""
+    for target, (reference, distance) in pairs.items():
+        split = "valid" if target in valid_indices else "train"
+        for suffix in ("", "_dim"):
+            shutil.copyfile(
+                os.path.join(output_dirs[f"train{suffix}"], f"patches_{reference:04d}.npy"),
+                os.path.join(output_dirs[f"{split}_ref{suffix}"], f"patches_{target:04d}.npy"),
+            )
+        with np.load(os.path.join(output_dirs["train_aux"], f"patches_{reference:04d}.npz")) as aux:
+            metadata = dict(aux)
+        metadata.update(
+            target_shot_index=np.int64(target), reference_shot_index=np.int64(reference),
+            target_shot_id=np.int64(dataset.shot_keys[target]),
+            reference_shot_id=np.int64(dataset.shot_keys[reference]),
+            reference_distance=np.float64(distance),
+            target_source_xy=coordinates[target], reference_source_xy=coordinates[reference],
+        )
+        np.savez(os.path.join(output_dirs[f"{split}_ref_aux"], f"patches_{target:04d}.npz"), **metadata)
+        print(f"Saved {split} reference: target={target:04d}, reference={reference:04d}, distance={distance:.7g}")
 
 
 def build_split_indices(num_shots, valid_ratio, valid_mode, seed):
@@ -238,17 +327,17 @@ def normalize_coordinate(values, minimum, maximum):
     if denominator == 0:
         return np.zeros_like(values, dtype=np.float32)
     return (
-        2.0 * (values.astype(np.float32) - float(minimum)) / denominator - 1.0
+            2.0 * (values.astype(np.float32) - float(minimum)) / denominator - 1.0
     ).astype(np.float32)
 
 
 def preprocess_volume(
-    volumes,
-    seismic_min,
-    seismic_max,
-    coord_min,
-    coord_max,
-    normalize,
+        volumes,
+        seismic_min,
+        seismic_max,
+        coord_min,
+        coord_max,
+        normalize,
 ):
     processed = volumes.astype(np.float32, copy=True)
     if normalize:
@@ -334,12 +423,12 @@ def extract_patches(volumes, patch_size, overlap, patch_processor):
 
 
 def save_metadata(
-    output_file,
-    positions,
-    original_shape,
-    scale,
-    coord_min,
-    coord_max,
+        output_file,
+        positions,
+        original_shape,
+        scale,
+        coord_min,
+        coord_max,
 ):
     np.savez(
         output_file,
@@ -405,9 +494,8 @@ def build_dataset(args):
     from core.patching import NumpyPatchProcessor
 
     validate_args(args)
-    output_dirs = build_output_dirs(args.output_dir)
-    for directory in output_dirs.values():
-        os.makedirs(directory, exist_ok=True)
+    gen_ref = getattr(args, "gen_ref", False)
+    output_dirs = build_output_dirs(args.output_dir, gen_ref)
 
     dataset = SegyDataset(args.segy)
     patch_processor = NumpyPatchProcessor()
@@ -421,6 +509,10 @@ def build_dataset(args):
         f"Shots: {len(dataset)}, train: {len(train_indices)}, "
         f"valid: {len(valid_indices)}"
     )
+    if gen_ref:
+        reference_pairs, source_coordinates = build_reference_pairs(dataset, train_indices, args.slice)
+    for directory in output_dirs.values():
+        os.makedirs(directory, exist_ok=True)
 
     seismic_min, seismic_max, coord_min, coord_max = scan_global_min_max(
         dataset,
@@ -503,6 +595,9 @@ def build_dataset(args):
             f"Saved {split_name} shot {shot_index:04d}: "
             f"patches={len(six_patches)}, six_channel_shape={six_patches.shape[1:]}"
         )
+
+    if gen_ref:
+        save_reference_patches(dataset, reference_pairs, source_coordinates, valid_indices, output_dirs)
 
     plot_shot_presence(
         train_shot_numbers,

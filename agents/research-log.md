@@ -22,6 +22,22 @@
 - **实验结论**：主要发现、对应证据、局限；原因解释若未验证，应标为推测。
 - **下一步计划**：具体操作、拟调整条件和判断标准。
 
+## 实验设计的默认写法
+
+用简洁的文本段落，依次写“测试数据集”“测试训练程序”“训练脚本”“重建脚本”“Git 版本号”，不用表格。训练脚本和重建脚本必须各占独立段落，不合并在“测试训练程序”段中。内容随当前实验核实和替换，不沿用示例中的程序、脚本或提交号。
+
+**测试数据集**：写原始数据文件名和数据集构建脚本；必要时补充实际使用的生成数据集、划分与预处理。例如：原始数据 `ma2+GathAP_header_edited.sgy`，构建脚本 `scripts/dreamcloud/build_shot_dataset.sh`。
+
+**测试训练程序**：先写网络和各实验组的关键变量，再写主要程序。例如：实验使用 AugmentedDiT 网络，分别设置 NeRF 频带数 NB=0、3、6。主要程序为 `AugmentedDiTSeisDimReconNeRF.py`。
+
+**训练脚本分别为**：列出每组完整的训练脚本名称。例如：`scripts/dreamcloud/train_AugmentedDiTSeisDimReconNeRF_t_p4_i64_NeRFBands0.sh`、`scripts/dreamcloud/train_AugmentedDiTSeisDimReconNeRF_t_p4_i64_NeRFBands3.sh` 和 `scripts/dreamcloud/train_AugmentedDiTSeisDimReconNeRF_t_p4_i64_NeRFBands6.sh`。
+
+**重建脚本分别为**：按与训练脚本相同的组别顺序，列出对应的重建脚本和所在目录。例如：`scripts/dreamcloud/recon_AugmentedDiTSeisDimReconNeRF_t_p4_i64_NeRFBands0.sh`、`scripts/dreamcloud/recon_AugmentedDiTSeisDimReconNeRF_t_p4_i64_NeRFBands3.sh` 和 `scripts/dreamcloud/recon_AugmentedDiTSeisDimReconNeRF_t_p4_i64_NeRFBands6.sh`。
+
+**Git 版本号**：写具体 commit 哈希，不用“HEAD”或仅写分支名。例如：`1b5b66652521a8d878d389e7e07fcf922dbefb62`。区分当前代码版本与实验运行时版本；运行时版本未知时明确写“运行时版本未记录”。
+
+若用户只要求简短的实验设计，可省略不影响理解的运行细节，但应保留上述三项和组间比较关系。
+
 ## 数值实验的复现信息
 
 写“实验设计”或“实验记录”时，简要记录适用的复现信息：

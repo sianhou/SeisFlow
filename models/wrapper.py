@@ -8,6 +8,7 @@ from torch import nn
 from core.training.model_utils import count_model_parameters
 from flow_matching.utils import ModelWrapper
 from models.pixeldit import AugmentedDiT2DModel, PixDiT
+from models.augmented_dit2d import AugmentedDiT2DModelV2
 from models.unet2 import UNet2DModel
 from diffusers.training_utils import EMAModel as EMA
 
@@ -814,6 +815,42 @@ class AugmentedDiT2DWrapper(PixelDiT2DWrapper):
         return prediction, projected_feature
 
 
+class AugmentedDiT2DWrapperV2(AugmentedDiT2DWrapper):
+    """Training and checkpoint adapter for ``AugmentedDiT2DModelV2``."""
+
+    model_cls = AugmentedDiT2DModelV2
+
+    def forward(self, x, timesteps, extra=None):
+        extra = {} if extra is None else extra
+        conditioning = extra.get("concat_conditioning")
+        if conditioning is not None:
+            x = torch.cat((x, conditioning), dim=1)
+
+        labels = extra.get("label")
+        if labels is None:
+            labels = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+
+        reference = extra.get("r")
+        if self.model.use_cross_attention and reference is None:
+            raise ValueError("Cross attention requires extra['r'] reference input.")
+
+        output = self.model(
+            x,
+            timesteps,
+            labels,
+            r=reference,
+            mask=extra.get("mask"),
+            return_patch_feature_at=self.repa_align_index,
+        )
+        if self.repa_projection is None:
+            return output
+
+        prediction, patch_feature = output
+        with torch.autocast(device_type=patch_feature.device.type, enabled=False):
+            projected_feature = self.repa_projection(patch_feature.float())
+        return prediction, projected_feature
+
+
 def build_pixeldit_2d_wrapper(
         model_arch="PixelDiT_XL",
         in_channels=4,
@@ -909,6 +946,49 @@ def build_augmented_dit_2d_wrapper(
     if device is not None:
         wrapper = wrapper.to(device)
     return wrapper
+
+
+def build_augmented_dit_2d_wrapper_v2(
+        model_arch="T",
+        in_channels=4,
+        out_channels=None,
+        num_groups=None,
+        hidden_size=None,
+        depth=None,
+        patch_size=2,
+        num_classes=1000,
+        max_period=10,
+        upcast_attention=False,
+        use_cross_attention=False,
+        device=None,
+):
+    """Build an ``AugmentedDiT2DModelV2`` from a named architecture preset."""
+    if model_arch not in AUGMENTED_DIT_2D_CONFIGS:
+        supported = ", ".join(sorted(AUGMENTED_DIT_2D_CONFIGS))
+        raise ValueError(
+            f"Unsupported AugmentedDiT architecture {model_arch!r}. "
+            f"Supported architectures: {supported}."
+        )
+
+    architecture = AUGMENTED_DIT_2D_CONFIGS[model_arch]
+    num_groups = architecture["num_groups"] if num_groups is None else num_groups
+    hidden_size = architecture["hidden_size"] if hidden_size is None else hidden_size
+    depth = architecture["depth"] if depth is None else depth
+
+    model = AugmentedDiT2DModelV2(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        num_groups=num_groups,
+        hidden_size=hidden_size,
+        depth=depth,
+        patch_size=patch_size,
+        num_classes=num_classes,
+        max_period=max_period,
+        upcast_attention=upcast_attention,
+        use_cross_attention=use_cross_attention,
+    )
+    wrapper = AugmentedDiT2DWrapperV2(model)
+    return wrapper.to(device) if device is not None else wrapper
 
 
 if __name__ == "__main__":
