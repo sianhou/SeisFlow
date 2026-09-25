@@ -25,27 +25,11 @@ class RawDefaultsHelpFormatter(
     pass
 
 
-def check_reference_files(target, reference):
-    target_files = [Path(path).name for path in target.patch_files]
-    reference_files = [Path(path).name for path in reference.patch_files]
-    if target_files != reference_files or target.cumulative_sizes != reference.cumulative_sizes:
-        raise ValueError("--ref must have the same patch filenames and counts as the input dataset.")
-    for target_file, reference_file in zip(target.patch_files, reference.patch_files):
-        target_shape = np.load(target_file, mmap_mode="r").shape
-        reference_shape = np.load(reference_file, mmap_mode="r").shape
-        if target_shape[-2:] != reference_shape[-2:] or (
-            len(reference_shape) == 4 and reference_shape[1] != 1
-        ):
-            raise ValueError(f"--ref must contain single-channel patches matching {Path(target_file).name}.")
-
-
 class ReferencedPatchDataset(Dataset):
     def __init__(self, seismic_dir, dim_dir, ref_dir):
         self.paired = PairedPatchDataset(seismic_dir, dim_dir)
         self.dataset1 = self.paired.dataset1
         self.reference = PatchDataset(ref_dir)
-        check_reference_files(self.paired.dataset0, self.reference)
-        check_reference_files(self.dataset1, self.reference)
 
     def __len__(self):
         return len(self.paired)
@@ -127,11 +111,6 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
 
     def compute_loss(self, model_output, sample, mode="velocity"):
         if self.repa_enabled:
-            if not isinstance(model_output, tuple) or len(model_output) != 2:
-                raise RuntimeError(
-                    "REPA-enabled AugmentedDiT must return "
-                    "(prediction, projected_feature)."
-                )
             prediction, self.repa_projected_feature = model_output
         else:
             prediction = model_output
@@ -141,10 +120,6 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
     def compute_auxiliary_loss(self):
         if not self.repa_enabled:
             return 0
-        if self.repa_projected_feature is None:
-            raise RuntimeError(
-                "REPA projected feature was not returned by the model."
-            )
 
         src_feature = self.repa_projected_feature
         dino_input = (self.repa_clean_images + 1.0) / 2.0
@@ -175,11 +150,6 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
         dst_tokens = dst_feature.shape[1]
         src_size = int(src_tokens ** 0.5)
         dst_size = int(dst_tokens ** 0.5)
-        if src_size * src_size != src_tokens or dst_size * dst_size != dst_tokens:
-            raise ValueError(
-                "REPA token counts must form square grids when resizing: "
-                f"src={src_tokens}, dst={dst_tokens}."
-            )
         src_spatial = src_feature.view(
             batch_size, src_size, src_size, channels
         ).permute(0, 3, 1, 2)
@@ -205,10 +175,6 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
         if not self.repa_enabled or not self.args.ckpt:
             return
         projection_path = Path(self.args.ckpt) / "repa_projection.pth"
-        if not projection_path.is_file():
-            raise FileNotFoundError(
-                f"REPA checkpoint is missing projection weights: {projection_path}"
-            )
         state = torch.load(
             projection_path,
             map_location=self.device,
@@ -229,21 +195,14 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
 
 class AugmentedDiTSeisDimReconNeRFSampler(Sampler):
     def setup_dataset(self):
-        dataset = PatchDataset(self.args.input_dim_dir)
-        if self.args.ref:
-            self.reference_dataset = PatchDataset(self.args.ref)
-            check_reference_files(dataset, self.reference_dataset)
-        return dataset
+        return PatchDataset(self.args.input_dim_dir)
 
     def setup_model(self):
-        model = AugmentedDiT2DWrapperV2.from_pretrained(
+        return AugmentedDiT2DWrapperV2.from_pretrained(
             save_directory=self.args.ckpt,
             device=self.device,
             use_ema=self.args.use_ema,
         )
-        if bool(self.args.ref) != bool(model.model.config.use_cross_attention):
-            raise ValueError("--ref must be provided exactly when the checkpoint uses cross attention.")
-        return model
 
     def load_input_batch(self, input_array, input_file, batch_start, batch_end):
         dimensions = input_array[batch_start:batch_end]
@@ -253,8 +212,6 @@ class AugmentedDiTSeisDimReconNeRFSampler(Sampler):
         if getattr(self, "_reference_file", None) != reference_file:
             self._reference_array = np.load(reference_file, mmap_mode="r")
             self._reference_file = reference_file
-        if self._reference_array.shape[0] != input_array.shape[0]:
-            raise ValueError(f"Reference patch count differs for {reference_file.name}.")
         return dimensions, self._reference_array[batch_start:batch_end]
 
     def preprocess_batch(self, batch):
