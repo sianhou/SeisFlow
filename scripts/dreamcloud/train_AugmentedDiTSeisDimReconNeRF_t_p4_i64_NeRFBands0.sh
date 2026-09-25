@@ -6,7 +6,7 @@ DREAMCLOUD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$DREAMCLOUD_SCRIPT_DIR/env.sh"
 
 DATA_DIR="$PROJ_DIR/shot_dataset64"
-NODES_LIST="${NODES_LIST:-node045,node046}"
+NODES_LIST="${NODES_LIST:-node042,node043}"
 if [[ -n "$NODES_LIST" ]]; then
     NUM_WORKERS="$(awk -F',' '{print NF}' <<< "$NODES_LIST")"
 else
