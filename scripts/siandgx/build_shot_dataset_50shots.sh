@@ -41,6 +41,7 @@ for patch_size in 32 64 128 256; do
         --seed "${SPLIT_SEED}" \
         --clip -2 2 \
         --slice 0 1501 \
+        --gen-ref \
         --normalize
 
     "${PYTHON_BIN}" "${CODE_PATH}/ExtractShot2.py" \
@@ -57,6 +58,7 @@ for patch_size in 32 64 128 256; do
         --valid 0.3 \
         --valid_mode group_random \
         --seed "${SPLIT_SEED}" \
+        --gen-ref \
         --slice 0 1501
 
     "${PYTHON_BIN}" "${CODE_PATH}/ExtractShot2.py" \

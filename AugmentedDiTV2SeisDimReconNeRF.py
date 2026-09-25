@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
 from core.dataset import PairedPatchDataset, PatchDataset
 from core.sampler import Sampler
@@ -12,8 +13,8 @@ from models.dinov2 import DINOv2
 from models.nerf import get_nerf_conditioning_channels, encode_nerf_conditioning
 from models.wrapper import (
     AUGMENTED_DIT_2D_CONFIGS,
-    AugmentedDiT2DWrapper,
-    build_augmented_dit_2d_wrapper,
+    AugmentedDiT2DWrapperV2,
+    build_augmented_dit_2d_wrapper_v2,
 )
 
 
@@ -22,6 +23,36 @@ class RawDefaultsHelpFormatter(
     argparse.RawDescriptionHelpFormatter,
 ):
     pass
+
+
+def check_reference_files(target, reference):
+    target_files = [Path(path).name for path in target.patch_files]
+    reference_files = [Path(path).name for path in reference.patch_files]
+    if target_files != reference_files or target.cumulative_sizes != reference.cumulative_sizes:
+        raise ValueError("--ref must have the same patch filenames and counts as the input dataset.")
+    for target_file, reference_file in zip(target.patch_files, reference.patch_files):
+        target_shape = np.load(target_file, mmap_mode="r").shape
+        reference_shape = np.load(reference_file, mmap_mode="r").shape
+        if target_shape[-2:] != reference_shape[-2:] or (
+            len(reference_shape) == 4 and reference_shape[1] != 1
+        ):
+            raise ValueError(f"--ref must contain single-channel patches matching {Path(target_file).name}.")
+
+
+class ReferencedPatchDataset(Dataset):
+    def __init__(self, seismic_dir, dim_dir, ref_dir):
+        self.paired = PairedPatchDataset(seismic_dir, dim_dir)
+        self.dataset1 = self.paired.dataset1
+        self.reference = PatchDataset(ref_dir)
+        check_reference_files(self.paired.dataset0, self.reference)
+        check_reference_files(self.dataset1, self.reference)
+
+    def __len__(self):
+        return len(self.paired)
+
+    def __getitem__(self, index):
+        seismic, dimensions = self.paired[index]
+        return seismic, dimensions, self.reference[index]
 
 
 class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
@@ -37,6 +68,10 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
         return self.args.repa_lambda > 0.0
 
     def setup_dataset(self):
+        if self.args.ref:
+            return ReferencedPatchDataset(
+                self.args.input_dir, self.args.input_dim_dir, self.args.ref,
+            )
         return PairedPatchDataset(
             self.args.input_dir,
             self.args.input_dim_dir,
@@ -45,7 +80,7 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
     def setup_model(self):
         raw_dim_channels = int(self.dataset.dataset1[0].shape[0])
         nerf_dim_channels = get_nerf_conditioning_channels(raw_dim_channels, self.args)
-        model = build_augmented_dit_2d_wrapper(
+        model = build_augmented_dit_2d_wrapper_v2(
             model_arch=self.args.model_arch,
             in_channels=1 + nerf_dim_channels,
             out_channels=1,
@@ -53,6 +88,7 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
             num_classes=1,
             max_period=self.args.max_period,
             upcast_attention=self.args.upcast_attention,
+            use_cross_attention=bool(self.args.ref),
             device=self.device,
         )
 
@@ -75,13 +111,19 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
         return model
 
     def preprocess_batch(self, batch):
-        clean_images, conditioning = batch
+        if self.args.ref:
+            clean_images, conditioning, reference = batch
+        else:
+            clean_images, conditioning = batch
         clean_images = clean_images.to(self.device, non_blocking=True)
         conditioning = conditioning.to(self.device, non_blocking=True)
         conditioning = encode_nerf_conditioning(conditioning, self.args)
         self.repa_clean_images = clean_images
         self.repa_projected_feature = None
-        return clean_images, {"concat_conditioning": conditioning}
+        extra = {"concat_conditioning": conditioning}
+        if self.args.ref:
+            extra["r"] = reference.to(self.device, non_blocking=True)
+        return clean_images, extra
 
     def compute_loss(self, model_output, sample, mode="velocity"):
         if self.repa_enabled:
@@ -187,16 +229,37 @@ class AugmentedDiTSeisDimReconNeRFTrainer(Trainer):
 
 class AugmentedDiTSeisDimReconNeRFSampler(Sampler):
     def setup_dataset(self):
-        return PatchDataset(self.args.input_dim_dir)
+        dataset = PatchDataset(self.args.input_dim_dir)
+        if self.args.ref:
+            self.reference_dataset = PatchDataset(self.args.ref)
+            check_reference_files(dataset, self.reference_dataset)
+        return dataset
 
     def setup_model(self):
-        return AugmentedDiT2DWrapper.from_pretrained(
+        model = AugmentedDiT2DWrapperV2.from_pretrained(
             save_directory=self.args.ckpt,
             device=self.device,
             use_ema=self.args.use_ema,
         )
+        if bool(self.args.ref) != bool(model.model.config.use_cross_attention):
+            raise ValueError("--ref must be provided exactly when the checkpoint uses cross attention.")
+        return model
+
+    def load_input_batch(self, input_array, input_file, batch_start, batch_end):
+        dimensions = input_array[batch_start:batch_end]
+        if not self.args.ref:
+            return dimensions
+        reference_file = Path(self.args.ref) / Path(input_file).name
+        if getattr(self, "_reference_file", None) != reference_file:
+            self._reference_array = np.load(reference_file, mmap_mode="r")
+            self._reference_file = reference_file
+        if self._reference_array.shape[0] != input_array.shape[0]:
+            raise ValueError(f"Reference patch count differs for {reference_file.name}.")
+        return dimensions, self._reference_array[batch_start:batch_end]
 
     def preprocess_batch(self, batch):
+        if self.args.ref:
+            batch, reference = batch
         batch = np.array(batch, copy=True)
         if batch.ndim == 3:
             batch = batch[:, np.newaxis, :, :]
@@ -213,7 +276,13 @@ class AugmentedDiTSeisDimReconNeRFSampler(Sampler):
             device=self.device,
             dtype=conditioning.dtype,
         )
-        return noise, {"concat_conditioning": conditioning}
+        extra = {"concat_conditioning": conditioning}
+        if self.args.ref:
+            reference = np.array(reference, copy=True)
+            if reference.ndim == 3:
+                reference = reference[:, np.newaxis, :, :]
+            extra["r"] = torch.from_numpy(reference).float().to(self.device, non_blocking=True)
+        return noise, extra
 
 
 def build_parser():
@@ -225,15 +294,17 @@ def build_parser():
         epilog=(
             "Examples:\n"
             "  Train:\n"
-            "  torchrun --nproc_per_node=4 AugmentedDiTSeisDimReconNeRF.py "
+            "  torchrun --nproc_per_node=4 AugmentedDiTV2SeisDimReconNeRF.py "
             "--input_dir ./dataset256/train "
             "--input_dim_dir ./dataset256/train_dim "
+            "--ref ./dataset256/train_ref "
             "--output_dir ./output_dim_recon "
             "--model_arch T --batch_size 32 --num_epochs 1000 --device cuda\n\n"
             "  Sample:\n"
-            "  torchrun --nproc_per_node=4 AugmentedDiTSeisDimReconNeRF.py sample "
+            "  torchrun --nproc_per_node=4 AugmentedDiTV2SeisDimReconNeRF.py sample "
             "--ckpt ./output_dim_recon/run/checkpoint_epoch_01000 "
             "--input_dim_dir ./dataset256/sample_dim "
+            "--ref ./dataset256/sample_ref "
             "--output_dir ./seisdimrecon_output "
             "--batch_size 32 --solver_step_size 0.05 --device cuda"
         ),
@@ -248,6 +319,7 @@ def build_parser():
     )
     parser.add_argument("--input_dir", default="./dataset/train")
     parser.add_argument("--input_dim_dir", default="./dataset/train_dim")
+    parser.add_argument("--ref", default=None, help="Matching reference patch directory (train_ref or valid_ref).")
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument(
         "--model_arch",

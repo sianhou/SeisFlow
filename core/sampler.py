@@ -156,6 +156,9 @@ class Sampler(Dist, ABC):
     def preprocess_batch(self, batch):
         return batch, None
 
+    def load_input_batch(self, input_array, input_file, batch_start, batch_end):
+        return input_array[batch_start:batch_end]
+
     @abstractmethod
     def setup_model(self):
         """Configure and return the model used for sampling."""
@@ -211,7 +214,7 @@ class Sampler(Dist, ABC):
                 for batch_start in range(0, num_patches, self.args.batch_size):
                     batch_end = min(batch_start + self.args.batch_size, num_patches, )
                     x_init, extra = self.preprocess_batch(
-                        input_array[batch_start:batch_end]
+                        self.load_input_batch(input_array, input_file, batch_start, batch_end)
                     )
                     sampled = self.solver.sample(
                         time_grid=self.time_grid,
