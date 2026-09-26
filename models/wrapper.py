@@ -3,14 +3,14 @@ from pathlib import Path
 import math
 import torch
 from diffusers.models import AutoencoderKL, DiTTransformer2DModel
+from diffusers.training_utils import EMAModel as EMA
 from torch import nn
 
 from core.training.model_utils import count_model_parameters
 from flow_matching.utils import ModelWrapper
+from models.augmented_dit_2d import AugmentedDiT2DModelV2
 from models.pixeldit import AugmentedDiT2DModel, PixDiT
-from models.augmented_dit2d import AugmentedDiT2DModelV2
 from models.unet2 import UNet2DModel
-from diffusers.training_utils import EMAModel as EMA
 
 TRAINING_STATE_NAME = "training_state.pth"
 EMA_DIR_NAME = "ema"
@@ -153,11 +153,11 @@ AUGMENTED_DIT_2D_CONFIGS["Nano"] = {
 # Counts use in_channels=3, out_channels=1, num_classes=1 (millions).
 #             UNet / AugmentedDiT (patch_size=2)
 UNET_2D_CONFIGS = {
-    "Nano": {"model_channels": 32, "num_res_blocks": 1},   # 2.88 / 2.83
-    "T": {"model_channels": 64, "num_res_blocks": 3},      # 21.52 / 21.81
-    "S": {"model_channels": 160, "num_res_blocks": 3},     # 134.05 / 129.47
-    "L": {"model_channels": 288, "num_res_blocks": 3},     # 433.91 / 418.83
-    "XL": {"model_channels": 352, "num_res_blocks": 3},    # 648.04 / 625.66
+    "Nano": {"model_channels": 32, "num_res_blocks": 1},  # 2.88 / 2.83
+    "T": {"model_channels": 64, "num_res_blocks": 3},  # 21.52 / 21.81
+    "S": {"model_channels": 160, "num_res_blocks": 3},  # 134.05 / 129.47
+    "L": {"model_channels": 288, "num_res_blocks": 3},  # 433.91 / 418.83
+    "XL": {"model_channels": 352, "num_res_blocks": 3},  # 648.04 / 625.66
 }
 
 
