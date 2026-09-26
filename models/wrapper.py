@@ -15,6 +15,168 @@ from models.unet2 import UNet2DModel
 TRAINING_STATE_NAME = "training_state.pth"
 EMA_DIR_NAME = "ema"
 
+
+class BaseModelWrapper(nn.Module):
+    """Common model, conditioning, and training checkpoint interface.
+
+    Subclasses set model_cls and implement their model-specific forward pass.
+    """
+
+    model_cls = None
+
+    def __init__(self, model):
+        """Register the underlying pretrained model.
+
+        Args:
+            model: Model providing save_pretrained and from_pretrained methods.
+        """
+        super().__init__()
+        self.model = model
+
+    @staticmethod
+    def concat_conditioning(x, extra=None):
+        """Append optional conditioning channels to an image input.
+
+        Args:
+            x: Input tensor shaped (B, C, H, W).
+            extra: Optional dictionary containing concat_conditioning shaped
+                (B, C_conditioning, H, W).
+
+        Returns:
+            Input with conditioning concatenated along the channel dimension,
+            or the original input when no conditioning is supplied.
+        """
+        extra = {} if extra is None else extra
+        conditioning = extra.get("concat_conditioning")
+        return x if conditioning is None else torch.cat((x, conditioning), dim=1)
+
+    @staticmethod
+    def get_labels(x, extra=None):
+        """Read class labels or create default zero labels for the input batch.
+
+        Args:
+            x: Input tensor whose first dimension is the batch size.
+            extra: Optional dictionary containing label shaped (B,).
+
+        Returns:
+            Supplied labels, or torch.long zeros shaped (B,) on x.device.
+        """
+        extra = {} if extra is None else extra
+        labels = extra.get("label")
+        if labels is None:
+            labels = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        return labels
+
+    def save_pretrained(
+            self,
+            save_directory,
+            optimizer=None,
+            lr_scheduler=None,
+            scaler=None,
+            args=None,
+            epoch=None,
+            ema=None,
+            **kwargs,
+    ):
+        """Save model weights and supplied training state in a directory.
+
+        Args:
+            save_directory: Destination checkpoint directory.
+            optimizer: Optional optimizer whose state is saved.
+            lr_scheduler: Optional learning-rate scheduler whose state is saved.
+            scaler: Optional AMP gradient scaler whose state is saved.
+            args: Optional training argument namespace serialized with vars.
+            epoch: Optional completed epoch number.
+            ema: Optional EMA saved in the ema subdirectory.
+            **kwargs: Options forwarded to the model's save_pretrained method.
+        """
+        save_directory = Path(save_directory)
+        self.model.save_pretrained(save_directory, **kwargs)
+
+        training_state = {}
+        if epoch is not None:
+            training_state["epoch"] = epoch
+        if optimizer is not None:
+            training_state["optimizer"] = optimizer.state_dict()
+        if lr_scheduler is not None:
+            training_state["lr_scheduler"] = lr_scheduler.state_dict()
+        if scaler is not None:
+            training_state["amp_scaler"] = scaler.state_dict()
+        if args is not None:
+            training_state["args"] = vars(args)
+        if ema is not None:
+            ema.save_pretrained(save_directory / EMA_DIR_NAME)
+        if training_state:
+            torch.save(training_state, save_directory / TRAINING_STATE_NAME)
+
+    @classmethod
+    def from_pretrained(
+            cls,
+            save_directory,
+            optimizer=None,
+            lr_scheduler=None,
+            scaler=None,
+            device=None,
+            return_training_state=False,
+            ema=None,
+            use_ema=False,
+            **kwargs,
+    ):
+        """Load the subclass's model and optionally restore training state.
+
+        Args:
+            save_directory: Local checkpoint directory.
+            optimizer: Optional optimizer restored with the training state.
+            lr_scheduler: Optional scheduler restored with the training state.
+            scaler: Optional AMP scaler restored with the training state.
+            device: Optional destination device for model and checkpoint tensors.
+            return_training_state: Whether to load training_state.pth and return
+                its contents along with the wrapper and completed epoch.
+            ema: Optional existing EMA instance restored from the ema directory.
+            use_ema: Whether to copy saved EMA weights into the loaded model.
+            **kwargs: Options forwarded to model_cls.from_pretrained, which uses
+                local_files_only=True.
+
+        Returns:
+            Wrapper, or (wrapper, completed_epoch, training_state) when
+            return_training_state is True. An absent epoch defaults to zero.
+        """
+        save_directory = Path(save_directory)
+        model = cls.model_cls.from_pretrained(
+            save_directory, local_files_only=True, **kwargs,
+        )
+        if device is not None:
+            model = model.to(device)
+        wrapper = cls(model)
+
+        if ema is not None or use_ema:
+            loaded_ema = EMA.from_pretrained(
+                save_directory / EMA_DIR_NAME, model_cls=cls.model_cls,
+            )
+            if ema is not None:
+                ema.load_state_dict(loaded_ema.state_dict())
+                ema.to(device=next(model.parameters()).device)
+            if use_ema:
+                loaded_ema.copy_to(model.parameters())
+
+        if not return_training_state:
+            return wrapper
+
+        training_state = torch.load(
+            save_directory / TRAINING_STATE_NAME,
+            map_location=device if device is not None else "cpu",
+            weights_only=False,
+        )
+        if optimizer is not None:
+            optimizer.load_state_dict(training_state["optimizer"])
+        if lr_scheduler is not None:
+            lr_scheduler.load_state_dict(training_state["lr_scheduler"])
+        if scaler is not None:
+            scaler.load_state_dict(training_state["amp_scaler"])
+
+        return wrapper, int(training_state.get("epoch", 0)), training_state
+
+
 DIT_TRANSFORMER_2D_CONFIGS = {
     "DiT_XL_2": {
         "num_layers": 28,
