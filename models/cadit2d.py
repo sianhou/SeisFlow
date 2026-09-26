@@ -270,8 +270,21 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
             y,
             r=None,
             mask=None,
-            return_patch_feature_at=None,
     ):
+        """Predict an image from noisy inputs and optional reference conditioning.
+
+        Args:
+            x: Input tensor shaped [B, in_channels, H, W].
+            t: Timesteps containing one value per batch item.
+            y: Class indices containing one value per batch item.
+            r: Reference tensor shaped [B, 1, H, W], required when
+                use_cross_attention is enabled and ignored otherwise.
+            mask: Optional boolean or additive attention mask broadcastable to
+                [B, num_groups, N, N], where N is the number of image patches.
+
+        Returns:
+            Prediction tensor shaped [B, out_channels, H, W].
+        """
         if x.dim() != 4:
             raise ValueError("AugmentedDiT2DModel expects x with shape [B,C,H,W].")
         batch_size, channels, height, width = x.shape
@@ -307,14 +320,11 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
         y_emb = self.y_embedder(y).view(batch_size, 1, self.hidden_size)
         conditioning = nn.functional.silu(t_emb + y_emb)
 
-        patch_feature = None
-        for block_index, block in enumerate(self.patch_blocks):
+        for block in self.patch_blocks:
             if not self.use_cross_attention:
                 tokens = block(x=tokens, c=conditioning, pos=pos, mask=mask)
             else:
                 tokens = block(x=tokens, c=conditioning, pos=pos, k=ref_tokens, v=ref_tokens, mask=mask)
-            if block_index == return_patch_feature_at:
-                patch_feature = tokens
 
         output_tokens = self.final_layer(tokens, conditioning)
         output_tokens = output_tokens.transpose(1, 2).contiguous()
@@ -325,12 +335,4 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
             stride=self.patch_size,
         )
 
-        if return_patch_feature_at is not None:
-            if patch_feature is None:
-                raise ValueError(
-                    "Requested patch feature layer is out of range: "
-                    f"index={return_patch_feature_at}, "
-                    f"depth={len(self.patch_blocks)}."
-                )
-            return output, patch_feature
         return output
