@@ -11,3 +11,7 @@ __pycache__/
 .DS_Store
 .idea/
 /.venv/
+/demos/toys/ddpm/
+/demos/toys/temp/
+/research_logs/
+/research_logs/

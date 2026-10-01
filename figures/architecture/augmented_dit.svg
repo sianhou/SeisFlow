@@ -1,0 +1,301 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1460" viewBox="0 0 1800 1460">
+  <title>AugmentedDiT</title>
+  <desc>Editable network diagram. Data flow is bottom to top. The right panel expands one repeated block; it is not an additional processing stage.</desc>
+  <defs>
+    <marker id="data-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 Z" fill="#202124" />
+    </marker>
+    <marker id="condition-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 Z" fill="#5b7092" />
+    </marker>
+  </defs>
+  <g id="background">
+    <rect width="1800" height="1460" fill="white" />
+    <rect id="detail-panel" x="1165" y="225" width="585" height="1055" rx="30" fill="#f3f3f3" stroke="#202124" stroke-width="3.2" />
+    <path id="footer-rule" d="M70 1370 H1730" stroke="#d4d8dd" stroke-width="1.5" />
+  </g>
+  <g id="connections">
+    <path id="head-to-output" d="M 310,285 L 310,265" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="linear-to-fold" d="M 310,385 L 310,347" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="norm-to-linear" d="M 310,490 L 310,450" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="stack-to-head" d="M 310,665 L 310,572" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="embed-to-stack" d="M 310,925 L 310,835" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="coordinates-to-fourier" d="M 775,1222 L 775,1190" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="data-to-concat" d="M 310,1222 L 310,1174" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="fourier-to-concat" d="M 620,1141 L 470,1141" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="concat-to-embedding" d="M 310,1108 L 310,1015" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="time-to-embedding" d="M 775,1040 L 775,1020" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="class-to-embedding" d="M 1040,1040 L 1040,1020" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="left-embedding-to-add" d="M 775,925 L 775,840 L 887,840" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="right-embedding-to-add" d="M 1040,925 L 1040,840 L 923,840" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="add-to-silu" d="M 905,822 L 905,795" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="silu-to-condition" d="M 905,730 L 905,670" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="condition-bus" d="M 905,670 L 550,670 L 550,531" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" />
+    <path id="condition-to-block" d="M 550,670 L 550,750 L 470,750" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="condition-to-output" d="M 550,531 L 470,531" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="detail-c-to-linear" d="M 1458,285 L 1458,320" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="modulation-bus" d="M 1230,396 L 1205,420 L 1205,1165" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" />
+    <path id="block-output-edge" d="M 1480,588 L 1480,505" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="block-input-edge" d="M 1480,1300 L 1480,1195" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="norm-to-attention" d="M 1480,1135 L 1480,1098" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="attention-to-gate" d="M 1480,990 L 1480,980" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="attention-gate-to-add" d="M 1480,944 L 1480,928" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="attention-add-to-ffn-norm" d="M 1480,892 L 1480,868" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="ffn-norm-to-ffn" d="M 1480,808 L 1480,776" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="ffn-to-gate" d="M 1480,706 L 1480,676" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="ffn-gate-to-add" d="M 1480,640 L 1480,624" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="attention-residual" d="M 1480,1220 L 1700,1220 L 1700,910 L 1498,910" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="ffn-residual" d="M 1480,884 L 1700,884 L 1700,606 L 1498,606" fill="none" stroke="#202124" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data-arrow)" />
+    <path id="condition-attention-mod" d="M 1205,1165 L 1340,1165" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="condition-attention-gate" d="M 1205,962 L 1462,962" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="condition-ffn-mod" d="M 1205,838 L 1340,838" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+    <path id="condition-ffn-gate" d="M 1205,658 L 1462,658" fill="none" stroke="#5b7092" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 6" marker-end="url(#condition-arrow)" />
+  </g>
+  <g id="modules">
+    <g id="unpatchify">
+      <rect id="unpatchify-shape" x="150" y="285" width="320" height="62" rx="12" fill="#fae1e1" stroke="#202124" stroke-width="3.2" />
+      <text id="unpatchify-label" x="310.0" y="324.5" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="310.0" dy="0">Unpatchify</tspan>
+      </text>
+    </g>
+    <g id="output-linear">
+      <rect id="output-linear-shape" x="150" y="385" width="320" height="65" rx="12" fill="#dedff0" stroke="#202124" stroke-width="3.2" />
+      <text id="output-linear-label" x="310.0" y="414.0" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="310.0" dy="0">Linear</tspan>
+      </text>
+      <text id="output-linear-subtitle" x="310.0" y="435" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="310.0" dy="0">D → p²</tspan>
+      </text>
+    </g>
+    <g id="output-adaln">
+      <rect id="output-adaln-shape" x="150" y="490" width="320" height="82" rx="12" fill="#f5f4bf" stroke="#202124" stroke-width="3.2" />
+      <text id="output-adaln-label" x="310.0" y="527.16" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="310.0" dy="0">RMSNorm + Modulate</tspan>
+      </text>
+      <text id="output-adaln-subtitle" x="310.0" y="557" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="310.0" dy="0">shift, scale = Linear(c)</tspan>
+      </text>
+    </g>
+    <g id="block-stack">
+      <rect id="block-stack-shape" x="150" y="665" width="320" height="170" rx="12" fill="#f3f3f3" stroke="#202124" stroke-width="3.2" />
+      <text id="block-stack-label" x="310.0" y="729.01" font-family="Arial, Helvetica, sans-serif" font-size="29" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="310.0" dy="0">AugmentedDiT</tspan>
+        <tspan x="310.0" dy="37.7">Block</tspan>
+      </text>
+      <text id="block-stack-subtitle" x="310.0" y="820" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="310.0" dy="0">Expanded at right</tspan>
+      </text>
+    </g>
+    <g id="data-patch-embedding">
+      <rect id="data-patch-embedding-shape" x="150" y="925" width="320" height="90" rx="12" fill="#fae1e1" stroke="#202124" stroke-width="3.2" />
+      <text id="data-patch-embedding-label" x="310.0" y="966.5" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="310.0" dy="0">Patchify + Linear</tspan>
+      </text>
+      <text id="data-patch-embedding-subtitle" x="310.0" y="1000" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="310.0" dy="0">(1 + C) p² → D</tspan>
+      </text>
+    </g>
+    <g id="coordinate-fourier">
+      <rect id="coordinate-fourier-shape" x="620" y="1100" width="310" height="90" rx="12" fill="#fae1e1" stroke="#202124" stroke-width="3.2" />
+      <text id="coordinate-fourier-label" x="775.0" y="1141.5" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="775.0" dy="0">NeRF encoding</tspan>
+      </text>
+      <text id="coordinate-fourier-subtitle" x="775.0" y="1175" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="775.0" dy="0">5 coordinates → C channels</tspan>
+      </text>
+    </g>
+    <g id="channel-concat">
+      <rect id="channel-concat-shape" x="150" y="1108" width="320" height="66" rx="12" fill="#dedff0" stroke="#202124" stroke-width="3.2" />
+      <text id="channel-concat-label" x="310.0" y="1149.5" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="310.0" dy="0">Channel concat</tspan>
+      </text>
+    </g>
+    <g id="time-embedding">
+      <rect id="time-embedding-shape" x="670" y="925" width="210" height="95" rx="12" fill="#fae1e1" stroke="#202124" stroke-width="3.2" />
+      <text id="time-embedding-label" x="775.0" y="965.37" font-family="Arial, Helvetica, sans-serif" font-size="23" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="775.0" dy="0">Time</tspan>
+        <tspan x="775.0" dy="29.9">Embedding</tspan>
+      </text>
+    </g>
+    <g id="class-embedding">
+      <rect id="class-embedding-shape" x="950" y="925" width="180" height="95" rx="12" fill="#fae1e1" stroke="#202124" stroke-width="3.2" />
+      <text id="class-embedding-label" x="1040.0" y="965.37" font-family="Arial, Helvetica, sans-serif" font-size="23" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1040.0" dy="0">Class</tspan>
+        <tspan x="1040.0" dy="29.9">Embedding</tspan>
+      </text>
+    </g>
+    <g id="condition-add">
+      <circle id="condition-add-shape" cx="905" cy="840" r="18" fill="white" stroke="#202124" stroke-width="2.8" />
+      <text id="condition-add-label" x="905" y="848" font-family="Arial, Helvetica, sans-serif" font-size="29" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="905" dy="0">+</tspan>
+      </text>
+    </g>
+    <g id="condition-silu">
+      <rect id="condition-silu-shape" x="800" y="730" width="210" height="65" rx="12" fill="#d4ead5" stroke="#202124" stroke-width="3.2" />
+      <text id="condition-silu-label" x="905.0" y="771.0" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="905.0" dy="0">SiLU</tspan>
+      </text>
+    </g>
+    <circle id="condition-fork" cx="550" cy="670" r="4.5" fill="#5b7092" />
+    <g id="block-condition-linear">
+      <rect id="block-condition-linear-shape" x="1210" y="320" width="495" height="76" rx="12" fill="#d4ead5" stroke="#202124" stroke-width="3.2" />
+      <text id="block-condition-linear-label" x="1457.5" y="355.18" font-family="Arial, Helvetica, sans-serif" font-size="27" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1457.5" dy="0">Linear(c) → 6D</tspan>
+      </text>
+      <text id="block-condition-linear-subtitle" x="1457.5" y="381" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="1457.5" dy="0">Independent parameters in each block</tspan>
+      </text>
+    </g>
+    <g id="ffn-residual-add">
+      <circle id="ffn-residual-add-shape" cx="1480" cy="606" r="18" fill="white" stroke="#202124" stroke-width="2.8" />
+      <text id="ffn-residual-add-label" x="1480" y="614" font-family="Arial, Helvetica, sans-serif" font-size="29" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480" dy="0">+</tspan>
+      </text>
+    </g>
+    <g id="ffn-gate">
+      <circle id="ffn-gate-shape" cx="1480" cy="658" r="18" fill="white" stroke="#202124" stroke-width="2.8" />
+      <text id="ffn-gate-label" x="1480" y="666" font-family="Arial, Helvetica, sans-serif" font-size="29" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480" dy="0">×</tspan>
+      </text>
+    </g>
+    <g id="feed-forward">
+      <rect id="feed-forward-shape" x="1340" y="706" width="280" height="70" rx="12" fill="#c1e8f3" stroke="#202124" stroke-width="3.2" />
+      <text id="feed-forward-label" x="1480.0" y="737.5" font-family="Arial, Helvetica, sans-serif" font-size="25" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480.0" dy="0">Feed Forward</tspan>
+      </text>
+      <text id="feed-forward-subtitle" x="1480.0" y="761" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="1480.0" dy="0">SwiGLU</tspan>
+      </text>
+    </g>
+    <g id="ffn-norm-modulate">
+      <rect id="ffn-norm-modulate-shape" x="1340" y="808" width="280" height="60" rx="12" fill="#f5f4bf" stroke="#202124" stroke-width="3.2" />
+      <text id="ffn-norm-modulate-label" x="1480.0" y="845.48" font-family="Arial, Helvetica, sans-serif" font-size="22" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480.0" dy="0">RMSNorm + Modulate</tspan>
+      </text>
+    </g>
+    <g id="attention-residual-add">
+      <circle id="attention-residual-add-shape" cx="1480" cy="910" r="18" fill="white" stroke="#202124" stroke-width="2.8" />
+      <text id="attention-residual-add-label" x="1480" y="918" font-family="Arial, Helvetica, sans-serif" font-size="29" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480" dy="0">+</tspan>
+      </text>
+    </g>
+    <g id="attention-gate">
+      <circle id="attention-gate-shape" cx="1480" cy="962" r="18" fill="white" stroke="#202124" stroke-width="2.8" />
+      <text id="attention-gate-label" x="1480" y="970" font-family="Arial, Helvetica, sans-serif" font-size="29" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480" dy="0">×</tspan>
+      </text>
+    </g>
+    <g id="self-attention">
+      <rect id="self-attention-shape" x="1340" y="990" width="280" height="108" rx="12" fill="#ffe4be" stroke="#202124" stroke-width="3.2" />
+      <text id="self-attention-label" x="1480.0" y="1024.5600000000002" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480.0" dy="0">Multi-Head</tspan>
+        <tspan x="1480.0" dy="31.2">Self-Attention</tspan>
+      </text>
+      <text id="self-attention-subtitle" x="1480.0" y="1083" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#525861" font-weight="normal">
+        <tspan x="1480.0" dy="0">Q/K norm + 2D RoPE</tspan>
+      </text>
+    </g>
+    <g id="attention-norm-modulate">
+      <rect id="attention-norm-modulate-shape" x="1340" y="1135" width="280" height="60" rx="12" fill="#f5f4bf" stroke="#202124" stroke-width="3.2" />
+      <text id="attention-norm-modulate-label" x="1480.0" y="1172.48" font-family="Arial, Helvetica, sans-serif" font-size="22" text-anchor="middle" fill="#202124" font-weight="normal">
+        <tspan x="1480.0" dy="0">RMSNorm + Modulate</tspan>
+      </text>
+    </g>
+    <circle id="attention-skip-fork" cx="1480" cy="1220" r="4.5" fill="#202124" />
+    <circle id="ffn-skip-fork" cx="1480" cy="884" r="4.5" fill="#202124" />
+    <circle id="condition-attention-mod-fork" cx="1205" cy="1165" r="4.5" fill="#5b7092" />
+    <circle id="condition-attention-gate-fork" cx="1205" cy="962" r="4.5" fill="#5b7092" />
+    <circle id="condition-ffn-mod-fork" cx="1205" cy="838" r="4.5" fill="#5b7092" />
+    <circle id="condition-ffn-gate-fork" cx="1205" cy="658" r="4.5" fill="#5b7092" />
+  </g>
+  <g id="annotations">
+    <text id="title" x="70" y="65" font-family="Arial, Helvetica, sans-serif" font-size="38" text-anchor="start" fill="#202124" font-weight="bold">
+      <tspan x="70" dy="0">AugmentedDiT</tspan>
+    </text>
+    <text id="subtitle" x="70" y="105" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="start" fill="#535b65" font-weight="normal">
+      <tspan x="70" dy="0">Coordinates concatenated with the noisy data</tspan>
+    </text>
+    <text id="overview-title" x="70" y="162" font-family="Arial, Helvetica, sans-serif" font-size="19" text-anchor="start" fill="#66717e" font-weight="bold">
+      <tspan x="70" dy="0">MODEL OVERVIEW</tspan>
+    </text>
+    <text id="detail-title" x="1165" y="162" font-family="Arial, Helvetica, sans-serif" font-size="19" text-anchor="start" fill="#66717e" font-weight="bold">
+      <tspan x="1165" dy="0">ONE BLOCK, EXPANDED</tspan>
+    </text>
+    <text id="detail-context" x="1458" y="203" font-family="Arial, Helvetica, sans-serif" font-size="19" text-anchor="middle" fill="#535b65" font-weight="normal">
+      <tspan x="1458" dy="0">Detail of the repeated block at left</tspan>
+    </text>
+    <text id="velocity-output" x="310" y="218" font-family="Arial, Helvetica, sans-serif" font-size="27" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="310" dy="0">Predicted velocity vθ</tspan>
+    </text>
+    <text id="velocity-shape" x="310" y="248" font-family="Arial, Helvetica, sans-serif" font-size="19" text-anchor="middle" fill="#535b65" font-weight="normal">
+      <tspan x="310" dy="0">[B, 1, H, W]</tspan>
+    </text>
+    <text id="repeat-count" x="106" y="759" font-family="Arial, Helvetica, sans-serif" font-size="31" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="106" dy="0">×L</tspan>
+    </text>
+    <text id="tokens-shape" x="335" y="888" font-family="Arial, Helvetica, sans-serif" font-size="19" text-anchor="start" fill="#535b65" font-weight="normal">
+      <tspan x="335" dy="0">[B, N, D]</tspan>
+    </text>
+    <text id="data-input" x="310" y="1255" font-family="Arial, Helvetica, sans-serif" font-size="28" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="310" dy="0">Noisy data x(t)</tspan>
+    </text>
+    <text id="data-input-shape" x="310" y="1287" font-family="Arial, Helvetica, sans-serif" font-size="20" text-anchor="middle" fill="#535b65" font-weight="normal">
+      <tspan x="310" dy="0">[B, 1, H, W]</tspan>
+    </text>
+    <text id="coordinate-input" x="775" y="1255" font-family="Arial, Helvetica, sans-serif" font-size="28" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="775" dy="0">Coordinates</tspan>
+    </text>
+    <text id="coordinate-components" x="775" y="1287" font-family="Arial, Helvetica, sans-serif" font-size="21" text-anchor="middle" fill="#535b65" font-weight="normal">
+      <tspan x="775" dy="0">(SX, SY, RX, RY, τ)</tspan>
+    </text>
+    <text id="concat-shape" x="335" y="1065" font-family="Arial, Helvetica, sans-serif" font-size="19" text-anchor="start" fill="#535b65" font-weight="normal">
+      <tspan x="335" dy="0">[B, 1 + C, H, W]</tspan>
+    </text>
+    <text id="time-input" x="775" y="1065" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="775" dy="0">Time t</tspan>
+    </text>
+    <text id="label-input" x="1040" y="1060" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="1040" dy="0">Class y = 0</tspan>
+    </text>
+    <text id="default-class-note" x="1040" y="1090" font-family="Arial, Helvetica, sans-serif" font-size="16" text-anchor="middle" fill="#535b65" font-weight="normal">
+      <tspan x="1040" dy="0">Fixed in this experiment</tspan>
+    </text>
+    <text id="time-broadcast" x="1058" y="889" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="start" fill="#535b65" font-weight="normal">
+      <tspan x="1058" dy="0">[B, 1, D]</tspan>
+    </text>
+    <text id="condition-label" x="850" y="611" font-family="Arial, Helvetica, sans-serif" font-size="24" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="850" dy="0">Global condition c</tspan>
+    </text>
+    <text id="condition-shape" x="850" y="644" font-family="Arial, Helvetica, sans-serif" font-size="20" text-anchor="middle" fill="#5b7092" font-weight="normal">
+      <tspan x="850" dy="0">[B, 1, D] · broadcast to N tokens</tspan>
+    </text>
+    <text id="block-condition-input" x="1458" y="273" font-family="Arial, Helvetica, sans-serif" font-size="23" text-anchor="middle" fill="#5b7092" font-weight="normal">
+      <tspan x="1458" dy="0">c: [B, 1, D]</tspan>
+    </text>
+    <text id="block-output" x="1480" y="487" font-family="Arial, Helvetica, sans-serif" font-size="23" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="1480" dy="0">Output tokens</tspan>
+    </text>
+    <text id="block-input" x="1480" y="1334" font-family="Arial, Helvetica, sans-serif" font-size="23" text-anchor="middle" fill="#202124" font-weight="normal">
+      <tspan x="1480" dy="0">Input tokens [B, N, D]</tspan>
+    </text>
+    <text id="condition-attention-mod-text" x="1218" y="1153" font-family="Arial, Helvetica, sans-serif" font-size="16" text-anchor="start" fill="#5b7092" font-weight="normal">
+      <tspan x="1218" dy="0">shift, scale</tspan>
+    </text>
+    <text id="condition-attention-gate-text" x="1218" y="950" font-family="Arial, Helvetica, sans-serif" font-size="16" text-anchor="start" fill="#5b7092" font-weight="normal">
+      <tspan x="1218" dy="0">gate α1</tspan>
+    </text>
+    <text id="condition-ffn-mod-text" x="1218" y="826" font-family="Arial, Helvetica, sans-serif" font-size="16" text-anchor="start" fill="#5b7092" font-weight="normal">
+      <tspan x="1218" dy="0">shift, scale</tspan>
+    </text>
+    <text id="condition-ffn-gate-text" x="1218" y="646" font-family="Arial, Helvetica, sans-serif" font-size="16" text-anchor="start" fill="#5b7092" font-weight="normal">
+      <tspan x="1218" dy="0">gate α2</tspan>
+    </text>
+    <text id="configuration-note" x="70" y="1407" font-family="Arial, Helvetica, sans-serif" font-size="20" text-anchor="start" fill="#535b65" font-weight="normal">
+      <tspan x="70" dy="0">Experiment: T · H = W = 64 · p = 4 · N = 256 · D = 384 · L = 8 · NeRF bands = 6 · C = 65</tspan>
+    </text>
+    <text id="physical-time-note" x="70" y="1440" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="start" fill="#535b65" font-weight="normal">
+      <tspan x="70" dy="0">τ = recording time; t = flow time. Blue dashed arrows denote conditioning. + = addition; × = elementwise gating.</tspan>
+    </text>
+  </g>
+</svg>

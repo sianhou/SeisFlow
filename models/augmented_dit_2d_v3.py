@@ -9,10 +9,6 @@ from models.pixeldit import apply_rotary_emb, PatchTokenEmbedder, TimestepCondit
 from models.wrapper import AUGMENTED_DIT_2D_CONFIGS, BaseModelWrapper
 
 
-# 问题1:
-# 第一个版本，我们先假设输入的参考数据只有纯地震数据
-# 也就是输入数据的ref_in_channels == 1
-
 # 问题2:
 # 参考 token 数被强制等于目标 token 数。从 x 取得 N，随后用同一个 N reshape k、v。
 # 只要参考 token 数 M≠N，就会报错。我用目标4个、参考2个 token 运行，得到 reshape 错误。
@@ -95,7 +91,7 @@ class RotaryCrossAttention(nn.Module):
         return x
 
 
-class CADiTBlock(nn.Module):
+class AugmentedDiTBlockV2(nn.Module):
     def __init__(
             self,
             hidden_size,
@@ -153,7 +149,7 @@ class CADiTBlock(nn.Module):
         return x
 
 
-class CADiT2DModel(ModelMixin, ConfigMixin):
+class AugmentedDiT2DModelV3(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
             self,
@@ -180,9 +176,6 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
         self.upcast_attention = bool(upcast_attention)
         self.use_cross_attention = bool(use_cross_attention)
 
-        if self.use_cross_attention:
-            self.ref_in_channels = 1
-
         if self.depth <= 0:
             raise ValueError(f"depth must be positive, got {depth}.")
         if self.patch_size <= 0:
@@ -205,14 +198,6 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
             bias=True,
         )
 
-        if self.use_cross_attention:
-            ref_patch_channels = self.ref_in_channels * self.patch_size ** 2
-            self.ref_patch_embedder = PatchTokenEmbedder(
-                ref_patch_channels,
-                self.hidden_size,
-                bias=True,
-            )
-
         self.t_embedder = TimestepConditioner(
             self.hidden_size,
             max_period=self.max_period,
@@ -222,7 +207,7 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
 
         self.patch_blocks = nn.ModuleList(
             [
-                CADiTBlock(
+                AugmentedDiTBlockV2(
                     self.hidden_size,
                     self.num_groups,
                     upcast_attention=self.upcast_attention,
@@ -271,21 +256,8 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
             y,
             r=None,
             mask=None,
+            return_patch_feature_at=None,
     ):
-        """Predict an image from noisy inputs and optional reference conditioning.
-
-        Args:
-            x: Input tensor shaped [B, in_channels, H, W].
-            t: Timesteps containing one value per batch item.
-            y: Class indices containing one value per batch item.
-            r: Reference tensor shaped [B, 1, H, W], required when
-                use_cross_attention is enabled and ignored otherwise.
-            mask: Optional boolean or additive attention mask broadcastable to
-                [B, num_groups, N, N], where N is the number of image patches.
-
-        Returns:
-            Prediction tensor shaped [B, out_channels, H, W].
-        """
         if x.dim() != 4:
             raise ValueError("AugmentedDiT2DModel expects x with shape [B,C,H,W].")
         batch_size, channels, height, width = x.shape
@@ -315,17 +287,20 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
                 kernel_size=self.patch_size,
                 stride=self.patch_size,
             ).transpose(1, 2)
-            ref_tokens = self.ref_patch_embedder(ref_tokens)
+            ref_tokens = self.patch_embedder(ref_tokens)
 
         t_emb = self.t_embedder(t.reshape(-1)).view(batch_size, 1, self.hidden_size)
         y_emb = self.y_embedder(y).view(batch_size, 1, self.hidden_size)
         conditioning = nn.functional.silu(t_emb + y_emb)
 
-        for block in self.patch_blocks:
+        patch_feature = None
+        for block_index, block in enumerate(self.patch_blocks):
             if not self.use_cross_attention:
                 tokens = block(x=tokens, c=conditioning, pos=pos, mask=mask)
             else:
                 tokens = block(x=tokens, c=conditioning, pos=pos, k=ref_tokens, v=ref_tokens, mask=mask)
+            if block_index == return_patch_feature_at:
+                patch_feature = tokens
 
         output_tokens = self.final_layer(tokens, conditioning)
         output_tokens = output_tokens.transpose(1, 2).contiguous()
@@ -336,28 +311,37 @@ class CADiT2DModel(ModelMixin, ConfigMixin):
             stride=self.patch_size,
         )
 
+        if return_patch_feature_at is not None:
+            if patch_feature is None:
+                raise ValueError(
+                    "Requested patch feature layer is out of range: "
+                    f"index={return_patch_feature_at}, "
+                    f"depth={len(self.patch_blocks)}."
+                )
+            return output, patch_feature
         return output
 
 
-class CADiT2DWrapper(BaseModelWrapper):
-    """Adapt CADiT inputs and inherit model, optimizer, and EMA checkpoint support."""
+class AugmentedDiT2DWrapperV3(BaseModelWrapper):
+    """Adapt V3 conditioning and inherit model, training-state, and EMA persistence."""
 
-    model_cls = CADiT2DModel
+    model_cls = AugmentedDiT2DModelV3
 
     def forward(self, x, timesteps, extra=None):
-        """Predict an image with optional spatial, class, and reference conditions.
+        """Predict the target velocity with an optional coordinate-aware reference.
 
         Args:
-            x: Image tensor shaped [B, C, H, W].
-            timesteps: Timesteps containing one value per batch item.
-            extra: Optional dictionary with concat_conditioning [B, C_cond, H, W],
-                label [B], reference r [B, 1, H, W], and an attention mask
-                broadcastable to [B, num_groups, N, N]. N is the patch count.
-                Labels default to zero; r is required when cross attention is
-                enabled. C + C_cond must equal the model's in_channels.
+            x: Target state [B, C_data, H, W], or an already concatenated input.
+            timesteps: Flow-matching times [B].
+            extra: Optional mapping containing concat_conditioning [B, C_cond,
+                H, W], label [B], r [B, in_channels, H, W], and an attention
+                mask broadcastable to [B, num_groups, N, N]. N is the patch
+                count. Reference r already contains data and encoded reference
+                coordinates in the same channel order as the target input.
+                Labels default to zero; cross attention requires r.
 
         Returns:
-            Prediction tensor shaped [B, out_channels, H, W].
+            Prediction tensor [B, out_channels, H, W].
         """
         extra = {} if extra is None else extra
         x = self.concat_conditioning(x, extra)
@@ -365,7 +349,7 @@ class CADiT2DWrapper(BaseModelWrapper):
         return self.model(x, timesteps, labels, r=extra.get("r"), mask=extra.get("mask"))
 
 
-def build_cadit_2d_wrapper(
+def build_augmented_dit_2d_wrapper_v3(
         model_arch="T",
         in_channels=4,
         out_channels=None,
@@ -379,27 +363,27 @@ def build_cadit_2d_wrapper(
         use_cross_attention=False,
         device=None,
 ):
-    """Build a CADiT wrapper using the shared AugmentedDiT architecture presets.
+    """Build a V3 wrapper using the shared AugmentedDiT architecture presets.
 
     Args:
         model_arch: Preset name: Nano, T, S, L, or XL.
-        in_channels: Total input channels after concatenating conditioning.
+        in_channels: Data plus encoded-coordinate channels in both input branches.
         out_channels: Prediction channels; None uses in_channels.
         num_groups: Attention head count; None uses the preset value.
         hidden_size: Token width; None uses the preset value.
         depth: Transformer block count; None uses the preset value.
-        patch_size: Side length of each square image patch.
-        num_classes: Class count, with one additional embedding for the null class.
+        patch_size: Side length of each square patch in both input branches.
+        num_classes: Class count, excluding the additional null-class embedding.
         max_period: Maximum period used by the timestep embedding.
         upcast_attention: Whether attention is computed in float32.
-        use_cross_attention: Whether to condition on extra['r'] reference images.
-        device: Optional destination device for the wrapper and model parameters.
+        use_cross_attention: Whether to use the complete reference in extra['r'].
+        device: Optional destination device for model parameters.
 
     Returns:
-        CADiT2DWrapper containing the configured CADiT2DModel.
+        AugmentedDiT2DWrapperV3 containing an AugmentedDiT2DModelV3.
     """
     architecture = AUGMENTED_DIT_2D_CONFIGS[model_arch]
-    model = CADiT2DModel(
+    model = AugmentedDiT2DModelV3(
         in_channels=in_channels,
         out_channels=out_channels,
         num_groups=architecture["num_groups"] if num_groups is None else num_groups,
@@ -411,5 +395,5 @@ def build_cadit_2d_wrapper(
         upcast_attention=upcast_attention,
         use_cross_attention=use_cross_attention,
     )
-    wrapper = CADiT2DWrapper(model)
+    wrapper = AugmentedDiT2DWrapperV3(model)
     return wrapper.to(device) if device is not None else wrapper
