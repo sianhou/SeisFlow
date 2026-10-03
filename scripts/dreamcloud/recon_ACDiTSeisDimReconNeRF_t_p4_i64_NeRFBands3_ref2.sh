@@ -48,7 +48,8 @@ for epoch in $(seq 100 100 2000); do
         --master_port="$MASTER_PORT" \
         ACDiTSeisDimReconNeRF.py sample \
         --ckpt "$checkpoint_dir" \
-        --input_dir "$DATA_DIR/valid" \
+        --ref_dir "$DATA_DIR/train" \
+        --ref_dim_dir "$DATA_DIR/train_dim" \
         --input_dim_dir "$DATA_DIR/valid_dim" \
         --output_dir "$RUN_DIR" \
         --log_id "valid_ema_epoch_${epoch_name}" \

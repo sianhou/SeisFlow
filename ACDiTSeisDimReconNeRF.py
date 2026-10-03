@@ -93,19 +93,19 @@ class ACDiTSeisDimReconNeRFTrainer(Trainer):
 
 
 class ACDiTSeisDimReconNeRFSampler(Sampler):
-    """Reconstruct coordinate patches using references from the paired input dataset."""
+    """Reconstruct target coordinates using an independent training reference pool."""
 
     def setup_dataset(self):
-        """Return target coordinate files and open the same paired input reference pool.
+        """Return target coordinates and open paired training references separately.
 
-        When use_ref >= 1, input_dir supplies signal patches paired with
-        input_dim_dir. Without references only input_dim_dir is needed.
+        input_dim_dir defines the reconstruction targets. When use_ref >= 1,
+        ref_dir/ref_dim_dir supply training signals and their paired coordinates.
+        No target signal data is read. Without references only input_dim_dir is needed.
         """
         if self.args.use_ref >= 1:
             self.reference_dataset = PairedPatchDataset(
-                self.args.input_dir, self.args.input_dim_dir,
+                self.args.ref_dir, self.args.ref_dim_dir,
             )
-            return self.reference_dataset.dataset1
         return PatchDataset(self.args.input_dim_dir)
 
     def setup_model(self):
@@ -154,10 +154,12 @@ def build_parser():
             "  Sample:\n"
             "  python ACDiTSeisDimReconNeRF.py sample "
             "--ckpt ./output_acdit/run/checkpoint_epoch_01000 "
-            "--input_dir ./dataset/train --input_dim_dir ./dataset/train_dim "
+            "--input_dim_dir ./dataset/valid_dim "
+            "--ref_dir ./dataset/train --ref_dim_dir ./dataset/train_dim "
             "--use_ref 2 --output_dir ./recon_acdit --device cuda\n\n"
             "Each target receives use_ref independent random references from the paired "
-            "input dataset, with replacement and without excluding itself. Signal and "
+            "training dataset, with replacement and without excluding itself. Sampling "
+            "targets come from input_dim_dir; references come from ref_dir/ref_dim_dir. Signal and "
             "coordinate files must have matching patch ordering. Both coordinate branches "
             "use the same NeRF settings. Sampling references stay fixed within each ODE run."
         ),
@@ -166,6 +168,14 @@ def build_parser():
     parser.add_argument("mode", nargs="?", choices=["train", "sample"], default="train")
     parser.add_argument("--input_dir", default="./dataset/train")
     parser.add_argument("--input_dim_dir", default="./dataset/train_dim")
+    parser.add_argument(
+        "--ref_dir", default="./dataset/train",
+        help="Training signal reference pool for sampling; unused during training or with use_ref=0.",
+    )
+    parser.add_argument(
+        "--ref_dim_dir", default="./dataset/train_dim",
+        help="Coordinates paired with ref_dir for sampling, separate from target input_dim_dir.",
+    )
     parser.add_argument(
         "--use_ref", default=0, type=int,
         help="Random references per target: 0 disables cross-attention; >=1 enables it.",

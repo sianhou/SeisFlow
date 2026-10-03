@@ -129,14 +129,16 @@ def test_trainer_preprocess_and_model(paired_dirs, monkeypatch, count):
 
 
 def test_cli_defaults():
-    """References default to zero and no obsolete separate reference directory is needed."""
+    """References default to zero; reconstruction reference directories point to training."""
     args = entry.build_parser().parse_args([])
     assert args.use_ref == 0 and args.nerf_bands == 6
+    assert args.ref_dir == './dataset/train'
+    assert args.ref_dim_dir == './dataset/train_dim'
 
 
 @pytest.mark.parametrize('count', [0, 2])
 def test_train_checkpoint_ema_and_sample(paired_dirs, tmp_path, monkeypatch, count):
-    """Run one epoch, resume training, load EMA, and reconstruct every patch file.
+    """Resume training, load EMA, and reconstruct separate targets using only train references.
 
     Args:
         paired_dirs: Temporary paired NPY directories.
@@ -163,8 +165,16 @@ def test_train_checkpoint_ema_and_sample(paired_dirs, tmp_path, monkeypatch, cou
     sample_args = make_args(paired_dirs, count)
     sample_args.mode, sample_args.ckpt = 'sample', str(checkpoint)
     sample_args.output_dir, sample_args.log_id = str(tmp_path / 'sample'), 'recon'
+    target_dir = tmp_path / 'valid_dim'
+    target_dir.mkdir()
+    # Validation has different filenames, values and patch count, and no signal directory.
+    np.save(target_dir / 'validation.npy', np.full((3, 5, 4, 6), -2, dtype=np.float32))
+    sample_args.input_dim_dir = str(target_dir)
+    sample_args.input_dir = str(tmp_path / 'no_target_signal_needed')
+    sample_args.ref_dir, sample_args.ref_dim_dir = map(str, paired_dirs)
     if not count:
-        sample_args.input_dir = str(tmp_path / 'no_signal_needed')
+        sample_args.ref_dir = str(tmp_path / 'no_reference_signal_needed')
+        sample_args.ref_dim_dir = str(tmp_path / 'no_reference_coordinates_needed')
     calls = []
     original_draw = entry.sample_reference_conditioning
 
@@ -180,14 +190,23 @@ def test_train_checkpoint_ema_and_sample(paired_dirs, tmp_path, monkeypatch, cou
         Returns:
             Reference conditioning produced by the real sampling helper.
         """
+        assert dataset.dataset0.data_path == paired_dirs[0]
+        assert dataset.dataset1.data_path == paired_dirs[1]
+        assert len(dataset) == 5
         calls.append(batch_size)
-        return original_draw(dataset, batch_size, args, device)
+        conditioning = original_draw(dataset, batch_size, args, device)
+        for reference, coordinates in zip(conditioning['r'], conditioning['r_coord']):
+            assert (reference >= 0).all()
+            torch.testing.assert_close(reference[:, 0], coordinates[:, 0])
+        return conditioning
 
     monkeypatch.setattr(entry, 'sample_reference_conditioning', record_draw)
     sampler = entry.ACDiTSeisDimReconNeRFSampler(sample_args)
     sampler.run()
-    assert calls == ([2, 1, 2] if count else [])
-    for name, patches in [('a.npy', 3), ('b.npy', 2)]:
-        result = np.load(Path(sampler.output_dir) / name)
-        assert result.shape == (patches, 1, 4, 6)
-        assert np.isfinite(result).all()
+    assert calls == ([2, 1] if count else [])
+    assert sampler.dataset.data_path == target_dir
+    output_files = list(Path(sampler.output_dir).glob('*.npy'))
+    assert [file.name for file in output_files] == ['validation.npy']
+    result = np.load(output_files[0])
+    assert result.shape == (3, 1, 4, 6)
+    assert np.isfinite(result).all()
