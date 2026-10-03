@@ -18,7 +18,7 @@ for patch_size in 64 128 256; do
         256) overlap_size="${OVERLAP_SIZE_256:-242}" ;;
     esac
 
-    output_dir="$PROJ_DIR/shot_dataset${patch_size}"
+    output_dir="$PROJ_DIR/shot_dataset${patch_size}_no_normalize_coords"
 
     echo "Building patch_size=${patch_size}, overlap_size=${overlap_size}, stride=$((patch_size - overlap_size))"
 
@@ -32,12 +32,12 @@ for patch_size in 64 128 256; do
         --seed "${SPLIT_SEED}" \
         --clip -2 2 \
         --slice 0 1501 \
-        --normalize
+        --normalize \
+        --no_normalize_coords
 
     "${PYTHON_BIN}" "${CODE_PATH}/ExtractShot2.py" \
         --segy "${SEGY}" \
         --output_dir "${output_dir}/shot" \
         --clip -2 2 \
         --slice 0 1501
-
 done

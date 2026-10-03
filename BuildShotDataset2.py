@@ -14,6 +14,7 @@ class ArgumentFormatter(
 
 
 def build_parser():
+    """Return the dataset CLI parser with independent amplitude and coordinate scaling options."""
     parser = argparse.ArgumentParser(
         description=(
             "Build six-channel seismic shot patches with global preprocessing. "
@@ -83,6 +84,15 @@ def build_parser():
         help=(
             "Normalize only the seismic channel globally after clip/slice using one "
             "shared max-absolute scale, so zero remains exactly zero."
+        ),
+    )
+    parser.add_argument(
+        "--no_normalize_coords",
+        action="store_true",
+        help=(
+            "Disable normalization of SX, SY, RX, RY and T to [-1, 1], "
+            "preserving loaded spatial coordinates and time sample indices. "
+            "Independent of --normalize, which controls seismic amplitudes only."
         ),
     )
     parser.add_argument(
@@ -338,7 +348,17 @@ def preprocess_volume(
         coord_min,
         coord_max,
         normalize,
+        normalize_coords=True,
 ):
+    """Return a processed float32 copy of six-channel volumes [6, H, W].
+
+    Args:
+        volumes: Seismic, SX, SY, RX, RY and time sample-index channels.
+        seismic_min, seismic_max: Global seismic extrema after clipping/slicing.
+        coord_min, coord_max: Global coordinate extrema grouped as X, Y and T.
+        normalize: Whether to scale seismic amplitudes by the global max-absolute value.
+        normalize_coords: Whether to map all five coordinate channels to [-1, 1].
+    """
     processed = volumes.astype(np.float32, copy=True)
     if normalize:
         processed[0] = normalize_volume_preserve_zero(
@@ -347,12 +367,13 @@ def preprocess_volume(
             seismic_max,
         )
 
-    # SX/RX share X statistics, SY/RY share Y statistics, and T has its own.
-    processed[1] = normalize_coordinate(processed[1], coord_min[0], coord_max[0])
-    processed[3] = normalize_coordinate(processed[3], coord_min[0], coord_max[0])
-    processed[2] = normalize_coordinate(processed[2], coord_min[1], coord_max[1])
-    processed[4] = normalize_coordinate(processed[4], coord_min[1], coord_max[1])
-    processed[5] = normalize_coordinate(processed[5], coord_min[2], coord_max[2])
+    if normalize_coords:
+        # SX/RX share X statistics, SY/RY share Y statistics, and T has its own.
+        processed[1] = normalize_coordinate(processed[1], coord_min[0], coord_max[0])
+        processed[3] = normalize_coordinate(processed[3], coord_min[0], coord_max[0])
+        processed[2] = normalize_coordinate(processed[2], coord_min[1], coord_max[1])
+        processed[4] = normalize_coordinate(processed[4], coord_min[1], coord_max[1])
+        processed[5] = normalize_coordinate(processed[5], coord_min[2], coord_max[2])
     return processed
 
 
@@ -490,6 +511,11 @@ def plot_shot_presence(present_shots, missing_shots, output_file):
 
 
 def build_dataset(args):
+    """Write shot patches, coordinates and metadata using parsed CLI options in args.
+
+    Amplitude and coordinate normalization are controlled independently.
+    Returns None; output files are written below args.output_dir.
+    """
     from core.dataset import SegyDataset
     from core.patching import NumpyPatchProcessor
 
@@ -542,6 +568,7 @@ def build_dataset(args):
             coord_min,
             coord_max,
             args.normalize,
+            normalize_coords=not args.no_normalize_coords,
         )
         six_patches, positions, _ = extract_patches(
             processed,
