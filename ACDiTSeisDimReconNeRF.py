@@ -1,6 +1,7 @@
-"""Train and reconstruct with ACDiT and random references from the input dataset."""
+"""Train and reconstruct with ACDiT and aligned, independently noised references."""
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -20,41 +21,90 @@ class RawDefaultsHelpFormatter(
     """Show argument defaults while retaining multiline CLI examples."""
 
 
-def sample_reference_conditioning(dataset, batch_size, args, device):
-    """Draw independent reference pairs from the full dataset with replacement.
+def reference_directories(args):
+    """Return configured (signal, coordinate) directory pairs in reference-slot order.
 
     Args:
-        dataset: PairedPatchDataset containing signal [1, H, W] and matching
-            raw coordinates [C_dim, H, W] at each index.
-        batch_size: Number of targets, each receiving args.use_ref references.
-        args: CLI namespace with use_ref, nerf_bands and nerf_include_input.
-        device: Device receiving reference tensors and NeRF coordinate features.
+        args: CLI namespace containing ref_dir1/ref_dim_dir1 and ref_dir2/ref_dim_dir2.
 
     Returns:
-        Mapping with r and r_coord lists of length args.use_ref. Their entries
-        have shapes [B, 1, H, W] and [B, C_nerf, H, W]. References may repeat
-        or equal the target; only the data/coordinate pair shares an index.
+        Zero, one or two directory pairs; an omitted signal directory disables its slot.
     """
-    indices = torch.randint(len(dataset), (args.use_ref, batch_size))
-    references, reference_coordinates = [], []
-    for reference_indices in indices.tolist():
-        pairs = [dataset[index] for index in reference_indices]
-        data = torch.stack([pair[0] for pair in pairs]).to(device, non_blocking=True)
-        coords = torch.stack([pair[1] for pair in pairs]).to(device, non_blocking=True)
+    return [
+        (data_dir, coord_dir)
+        for data_dir, coord_dir in (
+            (args.ref_dir1, args.ref_dim_dir1),
+            (args.ref_dir2, args.ref_dim_dir2),
+        )
+        if data_dir is not None
+    ]
+
+
+class AlignedReferencePatchDataset(PairedPatchDataset):
+    """Read target and reference pairs together so shuffling preserves alignment."""
+
+    def __init__(self, input_dir, input_dim_dir, reference_dirs):
+        """Open paired targets and references with matching filenames and patch ordering.
+
+        Args:
+            input_dir: Target signal directory.
+            input_dim_dir: Target coordinate directory.
+            reference_dirs: Ordered (signal, coordinate) directory pairs. Each
+                directory has the same filenames and per-file patch counts as targets.
+        """
+        super().__init__(input_dir, input_dim_dir)
+        self.references = [PairedPatchDataset(*paths) for paths in reference_dirs]
+
+    def __getitem__(self, index):
+        """Return a target and its reference pairs at the same global patch index.
+
+        Args:
+            index: Index into the common sorted file/patch ordering.
+
+        Returns:
+            Target [1, H, W], coordinates [C_dim, H, W], and a list of reference
+            (signal, coordinate) pairs with the same respective shapes.
+        """
+        data, coords = super().__getitem__(index)
+        return data, coords, [reference[index] for reference in self.references]
+
+
+def prepare_reference_conditioning(reference_pairs, args, device):
+    """Encode aligned references and draw one independent noise tensor for each.
+
+    Args:
+        reference_pairs: Batched tensor pairs ([B, 1, H, W], [B, C_dim, H, W]).
+        args: CLI namespace containing nerf_bands and nerf_include_input.
+        device: Destination device for conditioning tensors.
+
+    Returns:
+        Empty mapping without references, otherwise r/r_coord/r_noise lists.
+        Clean r and fixed r_noise have shape [B, 1, H, W]; r_coord has shape
+        [B, C_nerf, H, W]. The wrapper mixes r and r_noise at the current flow time.
+    """
+    if not reference_pairs:
+        return {}
+    references, reference_coordinates, reference_noise = [], [], []
+    for data, coords in reference_pairs:
+        data = data.to(device, non_blocking=True)
+        coords = coords.to(device, non_blocking=True)
         references.append(data)
         reference_coordinates.append(encode_nerf_conditioning(coords, args))
-    return {"r": references, "r_coord": reference_coordinates}
+        reference_noise.append(torch.randn_like(data))
+    return {"r": references, "r_coord": reference_coordinates, "r_noise": reference_noise}
 
 
 class ACDiTSeisDimReconNeRFTrainer(Trainer):
-    """Train target velocities with optional random clean reference patches."""
+    """Train target velocities with optional aligned reference patches."""
 
     def setup_dataset(self):
-        """Return the paired input dataset used for both targets and references."""
-        return PairedPatchDataset(self.args.input_dir, self.args.input_dim_dir)
+        """Return targets and configured references in a shared patch ordering."""
+        return AlignedReferencePatchDataset(
+            self.args.input_dir, self.args.input_dim_dir, reference_directories(self.args),
+        )
 
     def setup_model(self):
-        """Return an ACDiT wrapper with cross-attention enabled by use_ref >= 1."""
+        """Return an ACDiT wrapper with cross-attention when reference directories are given."""
         raw_dim_channels = int(self.dataset.dataset1[0].shape[0])
         return build_acdit_2d_wrapper(
             model_arch=self.args.model_arch,
@@ -65,48 +115,68 @@ class ACDiTSeisDimReconNeRFTrainer(Trainer):
             num_classes=1,
             max_period=self.args.max_period,
             upcast_attention=self.args.upcast_attention,
-            use_cross_attention=self.args.use_ref >= 1,
+            use_cross_attention=bool(self.dataset.references),
             device=self.device,
         )
 
     def preprocess_batch(self, batch):
-        """Prepare target coordinates and independently sampled reference pairs.
+        """Prepare aligned reference conditions before the trainer samples target flow times.
 
         Args:
-            batch: Signal [B, 1, H, W] and raw coordinates [B, C_dim, H, W]
-                from the paired input DataLoader.
+            batch: Target [B, 1, H, W], coordinates [B, C_dim, H, W], and
+                a list of batched reference signal/coordinate pairs from the DataLoader.
 
         Returns:
             Clean targets [B, 1, H, W] and a conditioning mapping containing
-            x_coord [B, C_nerf, H, W], plus r/r_coord lists when use_ref >= 1.
-            The base trainer adds noise only to the targets, leaving references clean.
+            x_coord [B, C_nerf, H, W], plus r/r_coord/r_noise lists when enabled.
+            The wrapper noises references at the same flow time as the target.
         """
-        clean_images, coordinates = batch
+        clean_images, coordinates, reference_pairs = batch
         clean_images = clean_images.to(self.device, non_blocking=True)
         coordinates = coordinates.to(self.device, non_blocking=True)
         extra = {"x_coord": encode_nerf_conditioning(coordinates, self.args)}
-        if self.args.use_ref >= 1:
-            extra.update(sample_reference_conditioning(
-                self.dataset, clean_images.shape[0], self.args, self.device,
-            ))
+        extra.update(prepare_reference_conditioning(reference_pairs, self.args, self.device))
         return clean_images, extra
 
 
 class ACDiTSeisDimReconNeRFSampler(Sampler):
-    """Reconstruct target coordinates using an independent training reference pool."""
+    """Reconstruct target coordinates using pre-aligned reference files."""
 
     def setup_dataset(self):
-        """Return target coordinates and open paired training references separately.
+        """Return target coordinates and open reference pairs under the target filenames.
 
-        input_dim_dir defines the reconstruction targets. When use_ref >= 1,
-        ref_dir/ref_dim_dir supply training signals and their paired coordinates.
-        No target signal data is read. Without references only input_dim_dir is needed.
+        input_dim_dir defines targets; ref_dir1/2 and ref_dim_dir1/2 contain
+        their aligned references. No target signal data is read.
         """
-        if self.args.use_ref >= 1:
-            self.reference_dataset = PairedPatchDataset(
-                self.args.ref_dir, self.args.ref_dim_dir,
-            )
+        self.reference_datasets = [
+            PairedPatchDataset(*paths) for paths in reference_directories(self.args)
+        ]
         return PatchDataset(self.args.input_dim_dir)
+
+    def load_input_batch(self, input_array, input_file, batch_start, batch_end):
+        """Load target coordinates and the same patch slice from each reference file.
+
+        Args:
+            input_array: Memory-mapped target coordinate array [P, C_dim, H, W].
+            input_file: Path identifying the common target/reference filename.
+            batch_start: First patch index, inclusive.
+            batch_end: Last patch index, exclusive.
+
+        Returns:
+            Numpy target coordinates and reference tensor pairs with shapes
+            [B, 1, H, W] and [B, C_dim, H, W].
+        """
+        references = []
+        for paired in self.reference_datasets:
+            tensors = []
+            for dataset in (paired.dataset0, paired.dataset1):
+                array = dataset._load_file(dataset.data_path / Path(input_file).name)
+                patches = torch.from_numpy(np.array(array[batch_start:batch_end], copy=True)).float()
+                if patches.ndim == 3:
+                    patches = patches.unsqueeze(1)
+                tensors.append(patches)
+            references.append(tensors)
+        return input_array[batch_start:batch_end], references
 
     def setup_model(self):
         """Return the ACDiT checkpoint wrapper, optionally applying saved EMA weights."""
@@ -115,17 +185,19 @@ class ACDiTSeisDimReconNeRFSampler(Sampler):
         )
 
     def preprocess_batch(self, batch):
-        """Prepare initial noise, target coordinates and fixed references for an ODE run.
+        """Prepare initial noise, aligned references and fixed reference noise for an ODE run.
 
         Args:
-            batch: Numpy coordinates [B, C_dim, H, W] or [B, H, W].
+            batch: Numpy coordinates [B, C_dim, H, W] or [B, H, W], and
+                reference signal/coordinate tensor pairs from load_input_batch.
 
         Returns:
             Noise [B, 1, H, W] and conditioning with encoded x_coord and optional
-            r/r_coord lists. References are sampled here once per batch and stay
-            fixed for every ODE evaluation of that batch.
+            r/r_coord/r_noise lists. Clean references and their independent noises
+            stay fixed; the wrapper computes r_t at each ODE evaluation's flow time.
         """
-        coordinates = np.array(batch, copy=True)
+        coordinates, reference_pairs = batch
+        coordinates = np.array(coordinates, copy=True)
         if coordinates.ndim == 3:
             coordinates = coordinates[:, np.newaxis, :, :]
         coordinates = torch.from_numpy(coordinates).float().to(self.device, non_blocking=True)
@@ -134,52 +206,49 @@ class ACDiTSeisDimReconNeRFSampler(Sampler):
             device=self.device, dtype=coordinates.dtype,
         )
         extra = {"x_coord": encode_nerf_conditioning(coordinates, self.args)}
-        if self.args.use_ref >= 1:
-            extra.update(sample_reference_conditioning(
-                self.reference_dataset, noise.shape[0], self.args, self.device,
-            ))
+        extra.update(prepare_reference_conditioning(reference_pairs, self.args, self.device))
         return noise, extra
 
 
 def build_parser():
-    """Return the ACDiT train/sample CLI; use_ref controls reference count and cross-attention."""
+    """Return the ACDiT CLI with up to two aligned reference directory pairs."""
     parser = argparse.ArgumentParser(
-        description="Train or sample ACDiT with NeRF coordinates and random paired references.",
+        description="Train or sample ACDiT with NeRF coordinates and aligned noised references.",
         epilog=(
             "Examples:\n"
             "  Train:\n"
             "  torchrun --nproc_per_node=4 ACDiTSeisDimReconNeRF.py "
             "--input_dir ./dataset/train --input_dim_dir ./dataset/train_dim "
-            "--use_ref 2 --output_dir ./output_acdit --model_arch T --device cuda\n\n"
+            "--ref_dir1 ./dataset/train_ref --ref_dim_dir1 ./dataset/train_ref_dim "
+            "--ref_dir2 ./dataset/train_ref2 --ref_dim_dir2 ./dataset/train_ref2_dim "
+            "--output_dir ./output_acdit --model_arch T --device cuda\n\n"
             "  Sample:\n"
             "  python ACDiTSeisDimReconNeRF.py sample "
             "--ckpt ./output_acdit/run/checkpoint_epoch_01000 "
             "--input_dim_dir ./dataset/valid_dim "
-            "--ref_dir ./dataset/train --ref_dim_dir ./dataset/train_dim "
-            "--use_ref 2 --output_dir ./recon_acdit --device cuda\n\n"
-            "Each target receives use_ref independent random references from the paired "
-            "training dataset, with replacement and without excluding itself. Sampling "
-            "targets come from input_dim_dir; references come from ref_dir/ref_dim_dir. Signal and "
-            "coordinate files must have matching patch ordering. Both coordinate branches "
-            "use the same NeRF settings. Sampling references stay fixed within each ODE run."
+            "--ref_dir1 ./dataset/valid_ref --ref_dim_dir1 ./dataset/valid_ref_dim "
+            "--ref_dir2 ./dataset/valid_ref2 --ref_dim_dir2 ./dataset/valid_ref2_dim "
+            "--output_dir ./recon_acdit --device cuda\n\n"
+            "Omit reference directories to disable cross-attention. Each supplied pair "
+            "must match target filenames, per-file patch counts and patch ordering. "
+            "All coordinates use the same NeRF settings. References use independent "
+            "Gaussian noises at the target flow time. Reference noises stay fixed "
+            "within each ODE run."
         ),
         formatter_class=RawDefaultsHelpFormatter,
     )
     parser.add_argument("mode", nargs="?", choices=["train", "sample"], default="train")
     parser.add_argument("--input_dir", default="./dataset/train")
     parser.add_argument("--input_dim_dir", default="./dataset/train_dim")
-    parser.add_argument(
-        "--ref_dir", default="./dataset/train",
-        help="Training signal reference pool for sampling; unused during training or with use_ref=0.",
-    )
-    parser.add_argument(
-        "--ref_dim_dir", default="./dataset/train_dim",
-        help="Coordinates paired with ref_dir for sampling, separate from target input_dim_dir.",
-    )
-    parser.add_argument(
-        "--use_ref", default=0, type=int,
-        help="Random references per target: 0 disables cross-attention; >=1 enables it.",
-    )
+    for slot in (1, 2):
+        parser.add_argument(
+            f"--ref_dir{slot}", default=None,
+            help=f"Aligned reference {slot} signals under target filenames; omit to disable this slot.",
+        )
+        parser.add_argument(
+            f"--ref_dim_dir{slot}", default=None,
+            help=f"Coordinates paired with --ref_dir{slot} in the same file/patch ordering.",
+        )
     parser.add_argument("--output_dir", default="./output_dir")
     parser.add_argument("--model_arch", choices=sorted(AUGMENTED_DIT_2D_CONFIGS), default="T")
     parser.add_argument("--patch_size", default=4, type=int)

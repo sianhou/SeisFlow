@@ -7,7 +7,7 @@ source "$DREAMCLOUD_SCRIPT_DIR/env.sh"
 
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="$PROJ_DIR/$SCRIPT_NAME"
-DATA_DIR="$PROJ_DIR/shot_dataset64"
+DATA_DIR="$PROJ_DIR/shot_dataset64_ref2"
 TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
 TRAIN_ROOT="$PROJ_DIR/$TRAIN_SCRIPT_NAME"
 
@@ -48,8 +48,10 @@ for epoch in $(seq 100 100 2000); do
         --master_port="$MASTER_PORT" \
         ACDiTSeisDimReconNeRF.py sample \
         --ckpt "$checkpoint_dir" \
-        --ref_dir "$DATA_DIR/train" \
-        --ref_dim_dir "$DATA_DIR/train_dim" \
+        --ref_dir1 "$DATA_DIR/valid_ref" \
+        --ref_dim_dir1 "$DATA_DIR/valid_ref_dim" \
+        --ref_dir2 "$DATA_DIR/valid_ref2" \
+        --ref_dim_dir2 "$DATA_DIR/valid_ref2_dim" \
         --input_dim_dir "$DATA_DIR/valid_dim" \
         --output_dir "$RUN_DIR" \
         --log_id "valid_ema_epoch_${epoch_name}" \
@@ -62,7 +64,6 @@ for epoch in $(seq 100 100 2000); do
         --pin_memory \
         --device cuda \
         --nerf_bands 3 \
-        --use_ref 2 \
         --use_ema \
         --log_console
 

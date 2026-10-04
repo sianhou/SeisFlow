@@ -30,7 +30,6 @@ TRAIN_JOB="ACDiTSeisDimReconNeRF.py train \
 --pin_memory \
 --device cuda \
 --nerf_bands 3 \
---use_ref 0 \
 --upcast_attention \
 --log_console"
 

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from models.acdit2d import ACDiT2DModel, ACDiTCrossAttnBlock, ACDiTMLPBlock, ACDiTSelfAttnBlock
+from models.acdit2d import ACDiT2DModel, ACDiT2DWrapper, ACDiTCrossAttnBlock, ACDiTMLPBlock, ACDiTSelfAttnBlock
 from models.pixeldit import AugmentedDiT2DModel, AugmentedDiTBlock, precompute_freqs_cis_2d
 
 
@@ -472,6 +472,85 @@ def test_model_reference_checkpoint(tmp_path):
     assert restored.use_cross_attention is True
     assert restored.config.use_cross_attention is True
     torch.testing.assert_close(restored(**inputs, r=refs, r_coord=coords), expected, atol=0, rtol=0)
+
+
+def test_references_share_layer_encoders_and_evolve():
+    """Verify references use each shared SA/MLP, feed cross-attention and carry state forward."""
+    model = make_model(use_cross_attention=True)
+    inputs = make_inputs()
+    refs = [torch.randn(2, 1, 2, 4), torch.randn(2, 1, 6, 2)]
+    coords = [torch.randn(2, 5, 2, 4), torch.randn(2, 5, 6, 2)]
+    embeddings = [model.embed_inputs(ref, coord) for ref, coord in zip(refs, coords)]
+    calls, handles = [], []
+    for block in model.patch_blocks:
+        layer_calls = {name: [] for name in ('attention', 'cross_attention', 'mlp')}
+        calls.append(layer_calls)
+        for name, records in layer_calls.items():
+            handles.append(block[name].register_forward_hook(
+                lambda module, args, output, records=records: records.append((args, output)),
+            ))
+    model(**inputs, r=refs, r_coord=coords)
+    for handle in handles:
+        handle.remove()
+
+    for layer_index, layer in enumerate(calls):
+        assert len(layer['attention']) == 3
+        assert len(layer['cross_attention']) == 1
+        assert len(layer['mlp']) == (3 if layer_index < model.depth - 1 else 1)
+        target_sa = layer['attention'][0]
+        cross_args = layer['cross_attention'][0][0]
+        torch.testing.assert_close(cross_args[0], target_sa[1])
+        torch.testing.assert_close(cross_args[1], torch.cat([
+            layer['attention'][1][1], layer['attention'][2][1],
+        ], dim=1))
+        for slot, (initial, coord_tokens, pos) in enumerate(embeddings):
+            sa_args, sa_output = layer['attention'][slot + 1]
+            prior = initial if layer_index == 0 else calls[layer_index - 1]['mlp'][slot + 1][1]
+            torch.testing.assert_close(sa_args[0], prior + coord_tokens)
+            torch.testing.assert_close(sa_args[1], target_sa[0][1])
+            torch.testing.assert_close(sa_args[2], pos)
+            if layer_index < model.depth - 1:
+                torch.testing.assert_close(layer['mlp'][slot + 1][0][0], sa_output)
+
+
+@pytest.mark.parametrize('as_list', [False, True])
+def test_wrapper_reference_noise_follows_target_times(as_list):
+    """Check per-sample times, noise/data endpoints and deterministic repeated ODE calls.
+
+    Args:
+        as_list: Exercise two reference tensors as a list or one tensor directly.
+    """
+    model = make_model(use_cross_attention=True)
+    wrapper = ACDiT2DWrapper(model)
+    inputs = make_inputs(batch=3)
+    times = torch.tensor([0.0, 0.25, 1.0])
+    refs = [torch.randn_like(inputs['x']) for _ in range(2)]
+    noises = [torch.randn_like(ref) for ref in refs]
+    coords = [torch.randn_like(inputs['x_coord']) for _ in refs]
+    extra = dict(x_coord=inputs['x_coord'], r=refs, r_noise=noises, r_coord=coords)
+    if not as_list:
+        extra.update(r=refs[0], r_noise=noises[0], r_coord=coords[0])
+    calls = []
+    handle = model.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(kwargs), with_kwargs=True,
+    )
+    rng_before = torch.random.get_rng_state().clone()
+    actual = wrapper(inputs['x'], times, extra)
+    repeated = wrapper(inputs['x'], times, extra)
+    handle.remove()
+    assert torch.equal(torch.random.get_rng_state(), rng_before)
+    torch.testing.assert_close(actual, repeated, atol=0, rtol=0)
+    for call in calls:
+        assert call['r_coord'] is extra['r_coord']
+        noised_refs = call['r'] if as_list else [call['r']]
+        for slot, noised in enumerate(noised_refs):
+            torch.testing.assert_close(noised[0], noises[slot][0])
+            torch.testing.assert_close(noised[1], 0.75 * noises[slot][1] + 0.25 * refs[slot][1])
+            torch.testing.assert_close(noised[2], refs[slot][2])
+    if as_list:
+        assert extra['r'] is refs and extra['r_noise'] is noises
+    else:
+        assert extra['r'] is refs[0] and extra['r_noise'] is noises[0]
 
 
 @pytest.mark.parametrize('upcast', [False, True])

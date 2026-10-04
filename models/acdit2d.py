@@ -177,7 +177,7 @@ class ACDiTMLPBlock(nn.Module):
 
 
 class ACDiT2DModel(ModelMixin, ConfigMixin):
-    """Inject coordinates and read reference data at each transformer layer."""
+    """Share self-attention/MLP encoding with references and read them at each layer."""
 
     @register_to_config
     def __init__(
@@ -319,7 +319,7 @@ class ACDiT2DModel(ModelMixin, ConfigMixin):
         return x_tokens, coord_tokens, pos
 
     def forward(self, x, x_coord, t, y, mask=None, r=None, r_coord=None, cross_mask=None):
-        """Predict data with per-layer coordinate injection and reference attention.
+        """Predict data using shared per-layer target/reference encoding and cross-attention.
 
         Args:
             x: Noisy input data [B, in_channels, H, W].
@@ -329,11 +329,13 @@ class ACDiT2DModel(ModelMixin, ConfigMixin):
             y: Class indices [B].
             mask: Boolean (True permits) or additive self-attention mask
                 broadcastable to [B, heads, N, N], where N=(H/p)*(W/p).
-            r: Reference data [B, in_channels, Hr, Wr], or a nonempty list/tuple
+            r: Noised reference data at flow time t [B, in_channels, Hr, Wr], or a nonempty list/tuple
                 of such tensors. Each spatial dimension must be divisible by p.
-                References use the same data/coordinate embedders as x. Their summed
-                tokens are reused by every cross-attention layer without passing
-                through self-attention or MLP blocks.
+                Each reference uses the same embedders, self-attention and MLP
+                modules as x, with its own coordinates and local RoPE grid.
+                References evolve independently; only their self-attention outputs
+                are concatenated for cross-attention. The final reference MLP is
+                omitted because its output would not be consumed.
                 None skips cross-attention; ignored when use_cross_attention=False.
             r_coord: Reference coordinates [B, in_coords_channels, Hr, Wr], or a
                 list/tuple aligned with r. Required when reference attention runs;
@@ -350,27 +352,35 @@ class ACDiT2DModel(ModelMixin, ConfigMixin):
         y_emb = self.y_embedder(y).view(batch_size, 1, self.hidden_size)
         t_emb = self.t_embedder(t.reshape(-1)).view(batch_size, 1, self.hidden_size)
         conditioning = F.silu(t_emb + y_emb)
+        reference_inputs = []
         if self.use_cross_attention and r is not None:
             if isinstance(r, torch.Tensor):
-                r_tokens, r_coord_tokens, r_pos = self.embed_inputs(r, r_coord)
+                reference_inputs = [self.embed_inputs(r, r_coord)]
             else:
                 reference_inputs = [
                     self.embed_inputs(reference, coords)
                     for reference, coords in zip(r, r_coord)
                 ]
-                r_tokens = torch.cat([item[0] for item in reference_inputs], dim=1)
-                r_coord_tokens = torch.cat([item[1] for item in reference_inputs], dim=1)
-                r_pos = torch.cat([item[2] for item in reference_inputs], dim=0)
-            reference_tokens = r_tokens + r_coord_tokens
+            r_pos = torch.cat([item[2] for item in reference_inputs], dim=0)
 
-        for block in self.patch_blocks:
+        for layer_index, block in enumerate(self.patch_blocks):
             x_tokens = x_tokens + x_coord_tokens
             x_tokens = block["attention"](x_tokens, conditioning, pos, mask)
-            if self.use_cross_attention and r is not None:
+            if reference_inputs:
+                reference_inputs = [
+                    (block["attention"](tokens + coords, conditioning, ref_pos), coords, ref_pos)
+                    for tokens, coords, ref_pos in reference_inputs
+                ]
+                reference_tokens = torch.cat([item[0] for item in reference_inputs], dim=1)
                 x_tokens = block["cross_attention"](
                     x_tokens, reference_tokens, conditioning, pos, r_pos, cross_mask,
                 )
             x_tokens = block["mlp"](x_tokens, conditioning)
+            if layer_index < self.depth - 1:
+                reference_inputs = [
+                    (block["mlp"](tokens, conditioning), coords, ref_pos)
+                    for tokens, coords, ref_pos in reference_inputs
+                ]
 
         output_tokens = self.final_layer(x_tokens, conditioning)
         return F.fold(
@@ -385,22 +395,36 @@ class ACDiT2DWrapper(BaseModelWrapper):
     model_cls = ACDiT2DModel
 
     def forward(self, x, timesteps, extra=None):
-        """Predict velocities with separate input and reference coordinates.
+        """Noise references at the target flow time and predict target velocities.
 
         Args:
             x: Noisy data [B, in_channels, H, W].
             timesteps: Flow-matching times [B].
             extra: Mapping with required x_coord [B, in_coords_channels, H, W],
-                optional label [B], and optional r/r_coord tensors or lists of
-                tensors [B, C, Hr, Wr]. Coordinates are already NeRF encoded.
+                optional label [B], and optional clean r/r_coord tensors or lists
+                of tensors [B, C, Hr, Wr]. When reference attention runs, r_noise
+                must match r's structure and shapes and contain independently drawn
+                Gaussian noise. Keep r and r_noise fixed throughout an ODE run;
+                references are mixed as (1-t)*r_noise + t*r on every call.
+                Coordinates are already NeRF encoded and receive no noise.
                 Optional mask and cross_mask are forwarded to the model.
 
         Returns:
             Velocity prediction [B, out_channels, H, W].
         """
+        references = extra.get("r")
+        if self.model.use_cross_attention and references is not None:
+            time = timesteps.reshape(-1, 1, 1, 1)
+            if isinstance(references, torch.Tensor):
+                references = (1 - time) * extra["r_noise"] + time * references
+            else:
+                references = [
+                    (1 - time) * noise + time * reference
+                    for reference, noise in zip(references, extra["r_noise"])
+                ]
         return self.model(
             x, extra["x_coord"], timesteps, self.get_labels(x, extra),
-            mask=extra.get("mask"), r=extra.get("r"), r_coord=extra.get("r_coord"),
+            mask=extra.get("mask"), r=references, r_coord=extra.get("r_coord"),
             cross_mask=extra.get("cross_mask"),
         )
 

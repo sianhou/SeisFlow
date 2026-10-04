@@ -33,7 +33,7 @@ for config in "64 32" "64 48" "128 64" "128 96"; do
         --seed "${SPLIT_SEED}" \
         --clip -2 2 \
         --slice 0 1501 \
-        --gen-ref \
+        --gen-ref 1 \
         --normalize
 
     "${PYTHON_BIN}" "${CODE_PATH}/ExtractShot2.py" \
@@ -50,7 +50,7 @@ for config in "64 32" "64 48" "128 64" "128 96"; do
         --valid 0.3 \
         --valid_mode group_random \
         --seed "${SPLIT_SEED}" \
-        --gen-ref \
+        --gen-ref 1 \
         --slice 0 1501
 
     "${PYTHON_BIN}" "${CODE_PATH}/ExtractShot2.py" \

@@ -24,8 +24,13 @@ def build_parser():
     )
     parser.add_argument("--segy", required=True, help="Input SEG-Y file.")
     parser.add_argument(
-        "--gen-ref", action="store_true",
-        help="Generate aligned reference patches from the nearest other training shot.",
+        "--gen-ref", type=int, choices=(0, 1, 2), default=0,
+        help=(
+            "Number of aligned references: 0 disables output; 1 uses the preceding "
+            "training shot; 2 also uses the following training shot, in sorted "
+            "shot-number order. If one side is missing, two references use the "
+            "nearest two distinct training shots on the available side."
+        ),
     )
     parser.add_argument(
         "--patch_size",
@@ -45,7 +50,8 @@ def build_parser():
         help=(
             "Output root. Writes train, train_dim and, when --valid > 0, "
             "valid and valid_dim, with corresponding aux metadata. "
-            "--gen-ref also writes train_ref/valid_ref and their _dim/_aux directories."
+            "--gen-ref 1 writes train_ref/valid_ref and their _dim/_aux directories. "
+            "--gen-ref 2 additionally writes train_ref2/valid_ref2 and their _dim/_aux directories."
         ),
     )
     parser.add_argument(
@@ -121,7 +127,17 @@ def validate_args(args):
         raise ValueError("--clip VMIN must be less than or equal to VMAX.")
 
 
-def build_output_dirs(output_dir, gen_ref=False):
+def build_output_dirs(output_dir, gen_ref=0):
+    """Return output paths for signal, coordinate, metadata and reference files.
+
+    Args:
+        output_dir: Dataset output root.
+        gen_ref: Reference count, 0, 1 or 2. The first reference retains the
+            existing _ref directory names; the second uses _ref2.
+
+    Returns:
+        Mapping from directory names to paths without creating directories.
+    """
     prefix = output_dir.rstrip(os.sep)
     directories = {
         "train": f"{prefix}/train",
@@ -131,24 +147,41 @@ def build_output_dirs(output_dir, gen_ref=False):
         "valid_dim": f"{prefix}/valid_dim",
         "valid_aux": f"{prefix}/valid_aux",
     }
-    if gen_ref:
+    for reference_number in range(1, gen_ref + 1):
+        reference_tag = "ref" if reference_number == 1 else "ref2"
         for split in ("train", "valid"):
             for suffix in ("", "_dim", "_aux"):
-                name = f"{split}_ref{suffix}"
+                name = f"{split}_{reference_tag}{suffix}"
                 directories[name] = os.path.join(output_dir, name)
     return directories
 
 
-def build_reference_pairs(dataset, train_indices, slice_range):
-    """Select references in scaled source XY space; validate before writing patches.
+def build_reference_pairs(dataset, train_indices, slice_range, gen_ref=1):
+    """Select preceding/following training shots before writing aligned patches.
 
-    Distances use the SEG-Y coordinate units (not necessarily metres). Existing
-    dim preprocessing is unchanged. Ties use the sorted shot index.
+    Args:
+        dataset: SegyDataset with shot_keys in ascending shot-number order.
+        train_indices: Training shot indices eligible to supply references.
+        slice_range: Time-sample bounds [start, end]; [0, 0] keeps all samples.
+        gen_ref: One for the preceding shot, two for preceding and following.
+
+    Returns:
+        A mapping from target index to an ordered list of (reference index,
+        source XY distance) pairs, and scaled source coordinates [shots, 2].
+        Selection uses shot-number order and excludes self. With two references,
+        a missing side uses the nearest two distinct shots on the available side,
+        ordered nearest first. One reference uses the nearest following shot when
+        there is no preceding training shot.
+        Reported XY distances use SEG-Y units, not necessarily metres.
     """
     import segyio
 
-    if len(train_indices) < 2:
-        raise ValueError("--gen-ref requires at least 2 training shots (self-reference is excluded).")
+    minimum_train_shots = gen_ref + 1
+    if len(train_indices) < minimum_train_shots:
+        raise ValueError(
+            f"--gen-ref {gen_ref} requires at least {minimum_train_shots} training shots "
+            "(distinct references, self-reference excluded)."
+        )
     coordinates = []
     shapes = []
     units = set()
@@ -179,39 +212,64 @@ def build_reference_pairs(dataset, train_indices, slice_range):
     candidates = np.asarray(sorted(train_indices), dtype=np.int64)
     pairs = {}
     for target in range(len(dataset)):
-        eligible = candidates[candidates != target]
-        distances = np.linalg.norm(coordinates[eligible] - coordinates[target], axis=1)
-        nearest = int(np.argmin(distances))
-        reference = int(eligible[nearest])
-        if shapes[target] != shapes[reference]:
-            raise ValueError(
-                f"Shot {dataset.shot_keys[target]} shape {shapes[target]} differs from nearest "
-                f"training reference {dataset.shot_keys[reference]} shape {shapes[reference]}."
-            )
-        pairs[target] = (reference, float(distances[nearest]))
+        before = candidates[candidates < target]
+        after = candidates[candidates > target]
+        preceding = int(before[-1] if len(before) else after[0])
+        references = [preceding]
+        if gen_ref == 2:
+            if not len(before):
+                following = int(after[1])
+            elif not len(after):
+                following = int(before[-2])
+            else:
+                following = int(after[0])
+            references.append(following)
+        pairs[target] = []
+        for reference in references:
+            if shapes[target] != shapes[reference]:
+                raise ValueError(
+                    f"Shot {dataset.shot_keys[target]} shape {shapes[target]} differs from "
+                    f"training reference {dataset.shot_keys[reference]} shape {shapes[reference]}."
+                )
+            distance = float(np.linalg.norm(coordinates[reference] - coordinates[target]))
+            pairs[target].append((reference, distance))
     return pairs, coordinates
 
 
 def save_reference_patches(dataset, pairs, coordinates, valid_indices, output_dirs):
-    """Reuse processed training arrays so reference preprocessing is identical."""
-    for target, (reference, distance) in pairs.items():
+    """Copy each selected training shot's processed patches under its target's name.
+
+    Args:
+        dataset: SegyDataset supplying shot IDs through shot_keys.
+        pairs: Target-index mapping to ordered (reference index, distance) lists.
+        coordinates: Scaled source XY coordinates [shots, 2].
+        valid_indices: Target indices assigned to validation output.
+        output_dirs: Directory mapping from build_output_dirs.
+
+    Returns:
+        None. Writes signal, coordinate and metadata files for each reference
+        slot, preserving patch order and the selected training shot's preprocessing.
+    """
+    for target, references in pairs.items():
         split = "valid" if target in valid_indices else "train"
-        for suffix in ("", "_dim"):
-            shutil.copyfile(
-                os.path.join(output_dirs[f"train{suffix}"], f"patches_{reference:04d}.npy"),
-                os.path.join(output_dirs[f"{split}_ref{suffix}"], f"patches_{target:04d}.npy"),
+        for reference_number, (reference, distance) in enumerate(references, start=1):
+            reference_tag = "ref" if reference_number == 1 else "ref2"
+            for suffix in ("", "_dim"):
+                shutil.copyfile(
+                    os.path.join(output_dirs[f"train{suffix}"], f"patches_{reference:04d}.npy"),
+                    os.path.join(output_dirs[f"{split}_{reference_tag}{suffix}"], f"patches_{target:04d}.npy"),
+                )
+            with np.load(os.path.join(output_dirs["train_aux"], f"patches_{reference:04d}.npz")) as aux:
+                metadata = dict(aux)
+            metadata.update(
+                target_shot_index=np.int64(target), reference_shot_index=np.int64(reference),
+                target_shot_id=np.int64(dataset.shot_keys[target]),
+                reference_shot_id=np.int64(dataset.shot_keys[reference]),
+                reference_distance=np.float64(distance),
+                target_source_xy=coordinates[target], reference_source_xy=coordinates[reference],
             )
-        with np.load(os.path.join(output_dirs["train_aux"], f"patches_{reference:04d}.npz")) as aux:
-            metadata = dict(aux)
-        metadata.update(
-            target_shot_index=np.int64(target), reference_shot_index=np.int64(reference),
-            target_shot_id=np.int64(dataset.shot_keys[target]),
-            reference_shot_id=np.int64(dataset.shot_keys[reference]),
-            reference_distance=np.float64(distance),
-            target_source_xy=coordinates[target], reference_source_xy=coordinates[reference],
-        )
-        np.savez(os.path.join(output_dirs[f"{split}_ref_aux"], f"patches_{target:04d}.npz"), **metadata)
-        print(f"Saved {split} reference: target={target:04d}, reference={reference:04d}, distance={distance:.7g}")
+            np.savez(os.path.join(output_dirs[f"{split}_{reference_tag}_aux"], f"patches_{target:04d}.npz"), **metadata)
+            print(f"Saved {split} {reference_tag}: target={target:04d}, reference={reference:04d}, distance={distance:.7g}")
 
 
 def build_split_indices(num_shots, valid_ratio, valid_mode, seed):
@@ -520,7 +578,7 @@ def build_dataset(args):
     from core.patching import NumpyPatchProcessor
 
     validate_args(args)
-    gen_ref = getattr(args, "gen_ref", False)
+    gen_ref = args.gen_ref
     output_dirs = build_output_dirs(args.output_dir, gen_ref)
 
     dataset = SegyDataset(args.segy)
@@ -536,7 +594,7 @@ def build_dataset(args):
         f"valid: {len(valid_indices)}"
     )
     if gen_ref:
-        reference_pairs, source_coordinates = build_reference_pairs(dataset, train_indices, args.slice)
+        reference_pairs, source_coordinates = build_reference_pairs(dataset, train_indices, args.slice, gen_ref)
     for directory in output_dirs.values():
         os.makedirs(directory, exist_ok=True)
 
