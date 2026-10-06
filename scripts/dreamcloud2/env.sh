@@ -5,7 +5,7 @@ export CODE_PATH="${CODE_PATH:-/dreamdata/24yds3d/deeplearning/SeisFlow}"
 export PYTHON_ENV_DIR="${PYTHON_ENV_DIR:-/dreamdata/24yds3d/deeplearning/python313/bin}"
 export PYTHON_BIN="${PYTHON_BIN:-$PYTHON_ENV_DIR/python3.13}"
 export TORCHRUN_BIN="${TORCHRUN_BIN:-$PYTHON_ENV_DIR/torchrun}"
-export PROJ_DIR="${PROJ_DIR:-/dreamdata/24yds3d/deeplearning/Temp}"
+export PROJ_DIR="${PROJ_DIR:-/dreamdata/24yds3d/deeplearning/Temp2}"
 export MASTER="${MASTER:-$(hostname)}"
 if [[ -z "${MASTER_ADDR:-}" ]]; then
     MASTER_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
