@@ -7,7 +7,7 @@ source "$DREAMCLOUD_SCRIPT_DIR/env.sh"
 
 # NODES_LIST contains workers only; the launching host is node rank zero.
 # An explicitly empty NODES_LIST enables single-node, multi-GPU training.
-NODES_LIST="${NODES_LIST-node07,node048,node049,node050}"
+NODES_LIST="${NODES_LIST-node048,node049}"
 if [[ -n "$NODES_LIST" ]]; then
     NUM_WORKERS="$(awk -F',' '{print NF}' <<< "$NODES_LIST")"
 else
