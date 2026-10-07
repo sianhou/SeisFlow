@@ -15,7 +15,7 @@ else
 fi
 NUM_NODES=$((NUM_WORKERS + 1))
 
-DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset128_overlap101}"
+DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset64_overlap32}"
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="${RUN_DIR:-$PROJ_DIR/$SCRIPT_NAME}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -33,7 +33,7 @@ TRAIN_JOB=(
     --output_dir "$RUN_DIR"
     --model_arch T --patch_size 4 --batch_size "$BATCH_SIZE"
     --num_epochs "$NUM_EPOCHS" --save_every_epochs "$SAVE_EVERY_EPOCHS"
-    --pin_memory --device cuda --nerf_bands 0 --upcast_attention --log_console
+    --pin_memory --device cuda --nerf_bands 6 --upcast_attention --log_console
 )
 LAUNCH=(
     "$TORCHRUN_BIN" --nnodes="$NUM_NODES" --nproc_per_node="$NPROC_PER_NODE"

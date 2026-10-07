@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+set -x
 set -euo pipefail
 
 DREAMCLOUD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,12 +29,6 @@ fi
 mkdir -p "$RUN_DIR"
 cd "$CODE_PATH"
 
-echo "MASTER: $MASTER ($MASTER_ADDR:$MASTER_PORT)"
-echo "NODES_LIST: $NODES_LIST"
-echo "NUM_NODES: $NUM_NODES; NPROC_PER_NODE: $NPROC_PER_NODE"
-echo "TRAIN_RUN_DIR: $TRAIN_RUN_DIR"
-echo "OUTPUT_DIR: $RUN_DIR"
-
 LAUNCH=(
     "$TORCHRUN_BIN" --nnodes="$NUM_NODES" --nproc_per_node="$NPROC_PER_NODE"
     --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT"
@@ -48,7 +43,6 @@ for epoch in $(seq "$FIRST_EPOCH" "$EPOCH_STEP" "$LAST_EPOCH"); do
     shot_output_dir="$RUN_DIR/valid_recon_shot_ema_epoch_${epoch_name}"
     diff_output_dir="$RUN_DIR/diff_recon_shot_ema_epoch_${epoch_name}"
 
-    echo "Reconstructing epoch $epoch with EMA weights from $checkpoint_dir"
     SAMPLE_JOB=(
         "$CODE_PATH/ACDiTSeisDimReconNeRF2.py" sample
         --ckpt "$checkpoint_dir" --input_dim_dir "$DATA_DIR/valid_dim"
@@ -76,13 +70,11 @@ for epoch in $(seq "$FIRST_EPOCH" "$EPOCH_STEP" "$LAST_EPOCH"); do
 
     # Sampling partitions files by global rank and ends with a distributed barrier.
     # Only this master shell merges/evaluates after every node has exited successfully.
-    echo "Reconstructing shots for epoch $epoch with EMA weights"
     "$PYTHON_BIN" "$CODE_PATH/ReconShotDataset2.py" \
         --input_dir "$patch_output_dir" \
         --input_aux_dir "$DATA_DIR/valid_aux" \
         --output_dir "$shot_output_dir"
 
-    echo "Generating shot differences for epoch $epoch with EMA weights"
     "$PYTHON_BIN" "$CODE_PATH/DiffShot.py" \
         --input1_dir "$DATA_DIR/shot" \
         --input2_dir "$shot_output_dir" \

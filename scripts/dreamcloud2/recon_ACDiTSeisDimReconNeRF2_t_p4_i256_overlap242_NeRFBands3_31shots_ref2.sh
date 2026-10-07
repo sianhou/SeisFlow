@@ -17,7 +17,7 @@ NUM_NODES=$((NUM_WORKERS + 1))
 
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="${RUN_DIR:-$PROJ_DIR/$SCRIPT_NAME}"
-DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset128_overlap101}"
+DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset256_overlap242}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 TRAIN_SCRIPT_NAME="${SCRIPT_NAME/#recon_/train_}"
 TRAIN_ROOT="${TRAIN_ROOT:-$PROJ_DIR/$TRAIN_SCRIPT_NAME}"
@@ -51,7 +51,7 @@ for epoch in $(seq "$FIRST_EPOCH" "$EPOCH_STEP" "$LAST_EPOCH"); do
         --output_dir "$RUN_DIR" --log_id "valid_ema_epoch_${epoch_name}"
         --model_arch T --patch_size 4 --batch_size "$BATCH_SIZE"
         --solver_step_size 0.05 --clip_recon -1 1 --pin_memory --device cuda
-        --nerf_bands 6 --use_ema --log_console
+        --nerf_bands 3 --use_ema --log_console
     )
     rank=1
     worker_pids=""

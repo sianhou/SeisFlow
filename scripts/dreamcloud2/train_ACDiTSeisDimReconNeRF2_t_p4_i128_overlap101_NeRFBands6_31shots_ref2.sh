@@ -40,25 +40,17 @@ LAUNCH=(
     --master_addr="$MASTER_ADDR" --master_port="$MASTER_PORT"
 )
 
-echo "MASTER: $MASTER ($MASTER_ADDR:$MASTER_PORT)"
-echo "NODES_LIST: $NODES_LIST"
-echo "NUM_NODES: $NUM_NODES; NPROC_PER_NODE: $NPROC_PER_NODE"
-echo "BATCH_SIZE per GPU: $BATCH_SIZE; global batch: $((BATCH_SIZE * NUM_NODES * NPROC_PER_NODE))"
-echo "OUTPUT_DIR: $RUN_DIR"
-
 cd "$CODE_PATH"
 rank=1
 worker_pids=""
 for node in $(tr ',' ' ' <<< "$NODES_LIST"); do
     printf -v remote_command '%q ' "${LAUNCH[@]}" --node_rank="$rank" "${TRAIN_JOB[@]}"
     printf -v remote_directory '%q' "$CODE_PATH"
-    echo "Starting training on $node (rank=$rank)..."
     ssh "$node" "cd $remote_directory && $remote_command" > "$RUN_DIR/train_${node}.log" 2>&1 &
     worker_pids="$worker_pids $!"
     rank=$((rank + 1))
 done
 
-echo "Starting training on master (rank=0)..."
 "${LAUNCH[@]}" --node_rank=0 "${TRAIN_JOB[@]}"
 for pid in $worker_pids; do
     wait "$pid"

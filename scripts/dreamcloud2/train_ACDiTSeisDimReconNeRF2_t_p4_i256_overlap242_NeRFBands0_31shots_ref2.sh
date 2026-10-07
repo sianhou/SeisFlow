@@ -15,7 +15,7 @@ else
 fi
 NUM_NODES=$((NUM_WORKERS + 1))
 
-DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset128_overlap101}"
+DATA_DIR="${DATA_DIR:-$PROJ_DIR/shot_dataset256_overlap242}"
 SCRIPT_NAME="$(basename "$0" .sh)"
 RUN_DIR="${RUN_DIR:-$PROJ_DIR/$SCRIPT_NAME}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
